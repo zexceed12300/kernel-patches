@@ -1,0 +1,63 @@
+From 11fc8743b34d378d861ed87c3a91bf4785c9cea3 Mon Sep 17 00:00:00 2001
+From: zexceed12300 <zexceed12300@gmail.com>
+Date: Thu, 9 Apr 2020 23:47:43 +0700
+Subject: [PATCH 2/6] oc-cpu-up-to-2016MHz-msm8953_rosy
+
+---
+ arch/arm/boot/dts/qcom/msm8953.dtsi      | 8 ++++++--
+ arch/arm/boot/dts/qcom/msm8953_rosy.dtsi | 8 ++++++--
+ 2 files changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm/boot/dts/qcom/msm8953.dtsi b/arch/arm/boot/dts/qcom/msm8953.dtsi
+index 05ff6cea..4ce5e5c2 100644
+--- a/arch/arm/boot/dts/qcom/msm8953.dtsi
++++ b/arch/arm/boot/dts/qcom/msm8953.dtsi
+@@ -995,14 +995,18 @@
+ 			< 1036800000 2>,
+ 			< 1401600000 3>,
+ 			< 1689600000 4>,
+-			< 1804800000 5>;
++			< 1804800000 5>,
++            < 1958400000 6>,
++            < 2016000000 7>;
+ 		qcom,speed6-bin-v0-cci =
+ 			<          0 0>,
+ 			<  261120000 1>,
+ 			<  414720000 2>,
+ 			<  560640000 3>,
+ 			<  675840000 4>,
+-			<  721920000 5>;
++			<  721920000 5>,
++            <  783360000 6>,
++			<  806400000 7>;
+ 		#clock-cells = <1>;
+ 	};
+ 
+diff --git a/arch/arm/boot/dts/qcom/msm8953_rosy.dtsi b/arch/arm/boot/dts/qcom/msm8953_rosy.dtsi
+index 3025af02..f43a032b 100644
+--- a/arch/arm/boot/dts/qcom/msm8953_rosy.dtsi
++++ b/arch/arm/boot/dts/qcom/msm8953_rosy.dtsi
+@@ -1025,14 +1025,18 @@
+ 			< 1036800000 2>,
+ 			< 1401600000 3>,
+ 			< 1689600000 4>,
+-			< 1804800000 5>;
++			< 1804800000 5>,
++            < 1958400000 6>,
++            < 2016000000 7>;
+ 		qcom,speed6-bin-v0-cci =
+ 			<          0 0>,
+ 			<  261120000 1>,
+ 			<  414720000 2>,
+ 			<  560640000 3>,
+ 			<  675840000 4>,
+-			<  721920000 5>;
++			<  721920000 5>,
++            <  783360000 6>,
++			<  806400000 7>;
+ 		#clock-cells = <1>;
+ 	};
+ 
+-- 
+2.23.0
+

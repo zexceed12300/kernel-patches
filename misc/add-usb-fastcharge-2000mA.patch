@@ -1,0 +1,230 @@
+From deafea48a8b8ac8d9252e8b1ae5550faf18145f1 Mon Sep 17 00:00:00 2001
+From: zexceed12300 <zexceed12300@gmail.com>
+Date: Fri, 10 Apr 2020 10:23:36 +0700
+Subject: [PATCH] add-usb-fastcharge-2000mA
+
+---
+ drivers/misc/Kconfig            |   7 +++
+ drivers/misc/Makefile           |   1 +
+ drivers/misc/fastchg.c          | 103 ++++++++++++++++++++++++++++++++
+ drivers/power/qpnp-smbcharger.c |  15 ++++-
+ include/linux/fastchg.h         |  22 +++++++
+ 5 files changed, 145 insertions(+), 3 deletions(-)
+ create mode 100644 drivers/misc/fastchg.c
+ create mode 100644 include/linux/fastchg.h
+
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index b78aefcd..80bb3863 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -612,6 +612,13 @@ config MEMORY_STATE_TIME
+ 	depends on PROFILING
+ 	help
+ 	  Memory time statistics exported to /sys/kernel/memory_state_time
++	  
++config FORCE_FAST_CHARGE
++	bool "Increase input current limit to 2000mA when charging via USB"
++	default n
++	help
++	  A simple sysfs interface to increase input current limit to
++	  2000mA when charging via USB.
+ 
+ source "drivers/misc/c2port/Kconfig"
+ source "drivers/misc/eeprom/Kconfig"
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index 553c46a3..0ec6842b 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -74,3 +74,4 @@ obj-$(CONFIG_MEMORY_STATE_TIME) += memory_state_time.o
+ obj-$(CONFIG_APDS9930)		+= apds993x.o
+ obj-$(CONFIG_UID_SYS_STATS) += uid_sys_stats.o
+ obj-$(CONFIG_MEMORY_STATE_TIME) += memory_state_time.o
++obj-$(CONFIG_FORCE_FAST_CHARGE) += fastchg.o
+diff --git a/drivers/misc/fastchg.c b/drivers/misc/fastchg.c
+new file mode 100644
+index 00000000..1b21c7d5
+--- /dev/null
++++ b/drivers/misc/fastchg.c
+@@ -0,0 +1,103 @@
++/*
++ * Author: Chad Froebel <chadfroebel@gmail.com>
++ *
++ * Port to Thulium: engstk <eng.stk@sapo.pt>
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++/*
++ * Possible values for "force_fast_charge" are :
++ *
++ *   0 - Disabled (default)
++ *   1 - Force faster charge
++*/
++
++#include <linux/kobject.h>
++#include <linux/sysfs.h>
++#include <linux/fastchg.h>
++#include <linux/string.h>
++#include <linux/module.h>
++
++int force_fast_charge = 0;
++
++static int __init get_fastcharge_opt(char *ffc)
++{
++	if (strcmp(ffc, "0") == 0) {
++		force_fast_charge = 0;
++	} else if (strcmp(ffc, "1") == 0) {
++		force_fast_charge = 1;
++	} else {
++		force_fast_charge = 0;
++	}
++	return 1;
++}
++
++__setup("ffc=", get_fastcharge_opt);
++
++static ssize_t force_fast_charge_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
++{
++	size_t count = 0;
++	count += sprintf(buf, "%d\n", force_fast_charge);
++	return count;
++}
++
++static ssize_t force_fast_charge_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
++{
++	sscanf(buf, "%d ", &force_fast_charge);
++	if (force_fast_charge < 0 || force_fast_charge > 1)
++		force_fast_charge = 0;
++
++	return count;
++}
++
++static struct kobj_attribute force_fast_charge_attribute =
++__ATTR(force_fast_charge, 0664, force_fast_charge_show, force_fast_charge_store);
++
++static struct attribute *force_fast_charge_attrs[] = {
++&force_fast_charge_attribute.attr,
++NULL,
++};
++
++static struct attribute_group force_fast_charge_attr_group = {
++.attrs = force_fast_charge_attrs,
++};
++
++/* Initialize fast charge sysfs folder */
++static struct kobject *force_fast_charge_kobj;
++
++int force_fast_charge_init(void)
++{
++	int force_fast_charge_retval;
++
++	force_fast_charge_kobj = kobject_create_and_add("fast_charge", kernel_kobj);
++	if (!force_fast_charge_kobj) {
++			return -ENOMEM;
++	}
++
++	force_fast_charge_retval = sysfs_create_group(force_fast_charge_kobj, &force_fast_charge_attr_group);
++
++	if (force_fast_charge_retval)
++		kobject_put(force_fast_charge_kobj);
++
++	if (force_fast_charge_retval)
++		kobject_put(force_fast_charge_kobj);
++
++	return (force_fast_charge_retval);
++}
++
++void force_fast_charge_exit(void)
++{
++	kobject_put(force_fast_charge_kobj);
++}
++
++module_init(force_fast_charge_init);
++module_exit(force_fast_charge_exit);
+diff --git a/drivers/power/qpnp-smbcharger.c b/drivers/power/qpnp-smbcharger.c
+index 1dd035b5..ea093f59 100644
+--- a/drivers/power/qpnp-smbcharger.c
++++ b/drivers/power/qpnp-smbcharger.c
+@@ -40,6 +40,9 @@
+ #include <linux/msm_bcl.h>
+ #include <linux/ktime.h>
+ #include <linux/pmic-voter.h>
++#ifdef CONFIG_FORCE_FAST_CHARGE
++#include <linux/fastchg.h>
++#endif
+ 
+ /* Mask/Bit helpers */
+ #define _SMB_MASK(BITS, POS) \
+@@ -1519,6 +1522,8 @@ static int smbchg_charging_en(struct smbchg_chip *chip, bool en)
+ #define CURRENT_500_MA		500
+ #define CURRENT_900_MA		900
+ #define CURRENT_1500_MA		1500
++#define CURRENT_1600_MA		1600
++#define CURRENT_2000_MA		2000
+ #define SUSPEND_CURRENT_MA	2
+ #define ICL_OVERRIDE_BIT	BIT(2)
+ static int smbchg_usb_suspend(struct smbchg_chip *chip, bool suspend)
+@@ -1833,9 +1838,13 @@ static int smbchg_set_usb_current_max(struct smbchg_chip *chip,
+ 				pr_err("Couldn't set CMD_IL rc = %d\n", rc);
+ 				goto out;
+ 			}
+-			chip->usb_max_current_ma = 500;
++			chip->usb_max_current_ma = 1600;
+ 		}
+-		if (current_ma == CURRENT_900_MA) {
++#ifdef CONFIG_FORCE_FAST_CHARGE
++        if ((force_fast_charge > 0 && current_ma == CURRENT_1600_MA) || current_ma == CURRENT_2000_MA) {
++#else
++		if (current_ma == CURRENT_2000_MA) {
++#endif
+ 			rc = smbchg_sec_masked_write(chip,
+ 					chip->usb_chgpth_base + CHGPTH_CFG,
+ 					CFG_USB_2_3_SEL_BIT, CFG_USB_3);
+@@ -1851,7 +1860,7 @@ static int smbchg_set_usb_current_max(struct smbchg_chip *chip,
+ 				pr_err("Couldn't set CMD_IL rc = %d\n", rc);
+ 				goto out;
+ 			}
+-			chip->usb_max_current_ma = 900;
++			chip->usb_max_current_ma = 2000;
+ 		}
+ 		break;
+ 	case POWER_SUPPLY_TYPE_USB_CDP:
+diff --git a/include/linux/fastchg.h b/include/linux/fastchg.h
+new file mode 100644
+index 00000000..9dc0adb6
+--- /dev/null
++++ b/include/linux/fastchg.h
+@@ -0,0 +1,22 @@
++/*
++ * Author: Chad Froebel <chadfroebel@gmail.com>
++ *
++ * Port to Thulium: engstk <eng.stk@sapo.pt>
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#ifndef _LINUX_FASTCHG_H
++#define _LINUX_FASTCHG_H
++
++extern int force_fast_charge;
++
++#endif
+-- 
+2.23.0
+

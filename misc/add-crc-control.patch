@@ -1,0 +1,25 @@
+From f8cd756f6d4dd16cfd72058d2df47dac19ddace0 Mon Sep 17 00:00:00 2001
+From: zexceed12300 <zexceed12300@gmail.com>
+Date: Fri, 10 Apr 2020 09:12:55 +0700
+Subject: [PATCH 3/6] add-crc-control
+
+---
+ drivers/mmc/core/core.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/mmc/core/core.c b/drivers/mmc/core/core.c
+index 7cceec44..1bc21a17 100644
+--- a/drivers/mmc/core/core.c
++++ b/drivers/mmc/core/core.c
+@@ -74,7 +74,7 @@ static const unsigned freqs[] = { 400000, 300000, 200000, 100000 };
+  * So we allow it it to be disabled.
+  */
+ bool use_spi_crc = 1;
+-module_param(use_spi_crc, bool, 0);
++module_param(use_spi_crc, bool, 0664);
+ 
+ /*
+  * Internal function. Schedule delayed work in the MMC work queue.
+-- 
+2.23.0
+
