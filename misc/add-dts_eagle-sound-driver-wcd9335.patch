@@ -1,0 +1,4152 @@
+From 4538f87bf42a6b98044338b5ce4d18813d3ac217 Mon Sep 17 00:00:00 2001
+From: zexceed12300 <zexceed12300@gmail.com>
+Date: Tue, 28 Jul 2020 17:34:52 +0000
+Subject: [PATCH] add-dts_eagle-sound-driver-wcd9335
+
+---
+ drivers/base/regmap/internal.h                |    4 +
+ drivers/misc/qcom/Kconfig                     |    9 +
+ drivers/misc/qcom/qdsp6v2/Makefile            |    1 +
+ .../misc/qcom/qdsp6v2/audio_hwacc_effects.c   |   63 +
+ drivers/misc/qcom/qdsp6v2/dts_eagle/Makefile  |   10 +
+ .../qcom/qdsp6v2/dts_eagle/dts_eagle_drv.c    |  634 +++++++
+ .../qcom/qdsp6v2/dts_eagle/dts_eagle_drv.h    |   54 +
+ include/sound/audio_calibration.h             |    7 +
+ include/sound/msm-dts-eagle.h                 |  148 ++
+ include/sound/q6adm-v2.h                      |    1 +
+ include/uapi/linux/msm_audio_calibration.h    |   21 +
+ sound/soc/codecs/wcd-mbhc-v2.c                |   67 +
+ sound/soc/codecs/wcd-mbhc-v2.h                |    2 +
+ sound/soc/codecs/wcd9335.c                    |   19 +
+ sound/soc/msm/qdsp6v2/Makefile                |    1 +
+ sound/soc/msm/qdsp6v2/audio_calibration.c     |  122 ++
+ .../soc/msm/qdsp6v2/msm-audio-effects-q6-v2.c |   29 +-
+ sound/soc/msm/qdsp6v2/msm-compress-q6-v2.c    |   76 +
+ sound/soc/msm/qdsp6v2/msm-dts-eagle.c         | 1640 +++++++++++++++++
+ sound/soc/msm/qdsp6v2/msm-dts-srs-tm-config.c |    1 +
+ .../soc/msm/qdsp6v2/msm-pcm-routing-devdep.c  |   39 +-
+ sound/soc/msm/qdsp6v2/msm-pcm-routing-v2.c    |   11 +
+ sound/soc/msm/qdsp6v2/q6adm.c                 |  257 +++
+ sound/soc/msm/qdsp6v2/q6asm.c                 |  237 +++
+ sound/soc/msm/qdsp6v2/q6core.c                |  111 +-
+ 25 files changed, 3558 insertions(+), 6 deletions(-)
+ create mode 100644 drivers/misc/qcom/qdsp6v2/dts_eagle/Makefile
+ create mode 100644 drivers/misc/qcom/qdsp6v2/dts_eagle/dts_eagle_drv.c
+ create mode 100644 drivers/misc/qcom/qdsp6v2/dts_eagle/dts_eagle_drv.h
+ create mode 100644 include/sound/msm-dts-eagle.h
+ create mode 100644 sound/soc/msm/qdsp6v2/msm-dts-eagle.c
+
+diff --git a/drivers/base/regmap/internal.h b/drivers/base/regmap/internal.h
+index 3fe28a8f..eafe8c74 100644
+--- a/drivers/base/regmap/internal.h
++++ b/drivers/base/regmap/internal.h
+@@ -84,6 +84,10 @@ struct regmap {
+ 	struct list_head debugfs_off_cache;
+ 	struct mutex cache_lock;
+ #endif
++	//Austin +++
++	struct list_head proc_off_cache;
++	struct mutex proc_cache_lock;
++	//Austin ---
+ 
+ 	unsigned int max_register;
+ 	bool (*writeable_reg)(struct device *dev, unsigned int reg);
+diff --git a/drivers/misc/qcom/Kconfig b/drivers/misc/qcom/Kconfig
+index 7baab66c..566257a7 100644
+--- a/drivers/misc/qcom/Kconfig
++++ b/drivers/misc/qcom/Kconfig
+@@ -23,3 +23,12 @@ config MSM_MCU_TIME_SYNC
+        help
+          Say Y here if you want to get mcu and apq8009 data transfer
+          with gpio.
++
++config AINUR_DTS_HW
++        bool "Ainur DTS hardware driver"
++        depends on SND_SOC_QDSP6V2
++        select SND_HWDEP
++        default n
++        help
++          Driver port of DTS' android audio hardware-processed
++          effect, which is processed upon the Hexagon DSP.
+diff --git a/drivers/misc/qcom/qdsp6v2/Makefile b/drivers/misc/qcom/qdsp6v2/Makefile
+index 90a123ad..07c525c4 100644
+--- a/drivers/misc/qcom/qdsp6v2/Makefile
++++ b/drivers/misc/qcom/qdsp6v2/Makefile
+@@ -4,3 +4,4 @@ obj-$(CONFIG_MSM_QDSP6V2_CODECS) += q6audio_v2.o q6audio_v2_aio.o
+ obj-$(CONFIG_MSM_QDSP6V2_CODECS) += audio_g711mlaw.o audio_g711alaw.o
+ obj-$(CONFIG_MSM_QDSP6V2_CODECS)  += audio_mp3.o audio_amrnb.o audio_amrwb.o audio_amrwbplus.o audio_evrc.o audio_qcelp.o amrwb_in.o audio_hwacc_effects.o
+ obj-$(CONFIG_MSM_ULTRASOUND) += ultrasound/
++obj-$(CONFIG_AINUR_DTS_HW)         += dts_eagle/
+diff --git a/drivers/misc/qcom/qdsp6v2/audio_hwacc_effects.c b/drivers/misc/qcom/qdsp6v2/audio_hwacc_effects.c
+index ebe9ab76..d2f354ae 100644
+--- a/drivers/misc/qcom/qdsp6v2/audio_hwacc_effects.c
++++ b/drivers/misc/qcom/qdsp6v2/audio_hwacc_effects.c
+@@ -17,6 +17,7 @@
+ #include "q6audio_common.h"
+ #include "audio_utils_aio.h"
+ #include <sound/msm-audio-effects-q6-v2.h>
++#include <sound/msm-dts-eagle.h>
+ 
+ #define MAX_CHANNELS_SUPPORTED		8
+ #define WAIT_TIMEDOUT_DURATION_SECS	1
+@@ -57,6 +58,32 @@ static void audio_effects_init_pp(struct audio_client *ac)
+ 	if (ret < 0)
+ 		pr_err("%s: Send SoftVolume Param failed ret=%d\n",
+ 			__func__, ret);
++
++	switch (ac->topology) {
++	case ASM_STREAM_POSTPROC_TOPO_ID_HPX_MASTER:
++
++		ret = q6asm_set_softvolume_v2(ac, &softvol,
++					      SOFT_VOLUME_INSTANCE_1);
++		if (ret < 0)
++			pr_err("%s: Send SoftVolume1 Param failed ret=%d\n",
++				__func__, ret);
++		ret = q6asm_set_softvolume_v2(ac, &softvol,
++					      SOFT_VOLUME_INSTANCE_2);
++		if (ret < 0)
++			pr_err("%s: Send SoftVolume2 Param failed ret=%d\n",
++				 __func__, ret);
++
++		msm_dts_eagle_init_master_module(ac);
++
++		break;
++	default:
++		ret = q6asm_set_softvolume_v2(ac, &softvol,
++					      SOFT_VOLUME_INSTANCE_1);
++		if (ret < 0)
++			pr_err("%s: Send SoftVolume Param failed ret=%d\n",
++				__func__, ret);
++		break;
++	}
+ }
+ 
+ static void audio_effects_deinit_pp(struct audio_client *ac)
+@@ -65,6 +92,14 @@ static void audio_effects_deinit_pp(struct audio_client *ac)
+ 		pr_err("%s: audio client null to deinit pp\n", __func__);
+ 		return;
+ 	}
++
++	switch (ac->topology) {
++	case ASM_STREAM_POSTPROC_TOPO_ID_HPX_MASTER:
++		msm_dts_eagle_deinit_master_module(ac);
++		break;
++	default:
++		break;
++	}
+ }
+ 
+ static void audio_effects_event_handler(uint32_t opcode, uint32_t token,
+@@ -399,6 +434,34 @@ static long audio_effects_set_pp_param(struct q6audio_effects *effects,
+ 			      &(effects->audio_effects.topo_switch_vol),
+ 			      (long *)&values[1], SOFT_VOLUME_INSTANCE_2);
+ 		break;
++
++	case DTS_EAGLE_MODULE_ENABLE:
++		pr_debug("%s: DTS_EAGLE_MODULE_ENABLE\n", __func__);
++		if (msm_audio_effects_is_effmodule_supp_in_top(
++			effects_module, effects->ac->topology)) {
++			/*
++			 * HPX->OFF: first disable HPX and then
++			 * enable SA+
++			 * HPX->ON: first disable SA+ and then
++			 * enable HPX
++			 */
++			bool hpx_state = (bool)values[1];
++			if (hpx_state)
++				msm_audio_effects_enable_extn(effects->ac,
++					&(effects->audio_effects),
++					false);
++			msm_dts_eagle_enable_asm(effects->ac,
++				hpx_state,
++				AUDPROC_MODULE_ID_DTS_HPX_PREMIX);
++			msm_dts_eagle_enable_asm(effects->ac,
++				hpx_state,
++				AUDPROC_MODULE_ID_DTS_HPX_POSTMIX);
++			if (!hpx_state)
++				msm_audio_effects_enable_extn(effects->ac,
++					&(effects->audio_effects),
++					true);
++		}
++		break;
+ 	default:
+ 		pr_err("%s: Invalid effects config module\n", __func__);
+ 		rc = -EINVAL;
+diff --git a/drivers/misc/qcom/qdsp6v2/dts_eagle/Makefile b/drivers/misc/qcom/qdsp6v2/dts_eagle/Makefile
+new file mode 100644
+index 00000000..0ad734f2
+--- /dev/null
++++ b/drivers/misc/qcom/qdsp6v2/dts_eagle/Makefile
+@@ -0,0 +1,10 @@
++# DTS_EAGLE START
++
++#PWD := $(shell pwd)
++
++obj-y += dts_eagle_drv.o
++#build:
++#   make -C $(KERNELSRC) M=$(PWD) modules
++#clean:
++#   make -C $(KERNELSRC) M=$(PWD) clean
++# DTS_EAGLE END
+diff --git a/drivers/misc/qcom/qdsp6v2/dts_eagle/dts_eagle_drv.c b/drivers/misc/qcom/qdsp6v2/dts_eagle/dts_eagle_drv.c
+new file mode 100644
+index 00000000..ae89bd0e
+--- /dev/null
++++ b/drivers/misc/qcom/qdsp6v2/dts_eagle/dts_eagle_drv.c
+@@ -0,0 +1,634 @@
++/* DTS_EAGLE START */
++
++#include <linux/module.h>   /* Needed by all modules */
++#include <linux/kernel.h>   /* Needed for KERN_INFO */
++#include <linux/init.h>     /* Needed for the macros */
++#include <linux/version.h>
++#include <linux/fs.h>
++#include <linux/cdev.h>
++#include <linux/device.h>
++#include <linux/semaphore.h>
++#include <linux/errno.h>
++#include <linux/uaccess.h>
++#include <linux/slab.h>
++#include "dts_eagle_drv.h"
++
++#define DTS_EAGLE_DRIVER_FIRST_MINOR    1
++#define DTS_EAGLE_DRIVER_MINOR_CNT      6
++
++enum {
++	AUDIO_DEVICE_OUT_EARPIECE = 0,
++	AUDIO_DEVICE_OUT_SPEAKER,
++	AUDIO_DEVICE_OUT_WIRED_HEADSET,
++	AUDIO_DEVICE_OUT_WIRED_HEADPHONE,
++	AUDIO_DEVICE_OUT_BLUETOOTH_SCO,
++	AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET,
++	AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT,
++	AUDIO_DEVICE_OUT_BLUETOOTH_A2DP,
++	AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES,
++	AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_SPEAKER,
++	AUDIO_DEVICE_OUT_AUX_DIGITAL,
++	AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET,
++	AUDIO_DEVICE_OUT_DGTL_DOCK_HEADSET,
++	AUDIO_DEVICE_OUT_USB_ACCESSORY,
++	AUDIO_DEVICE_OUT_USB_DEVICE,
++	AUDIO_DEVICE_OUT_REMOTE_SUBMIX,
++	AUDIO_DEVICE_OUT_ANC_HEADSET,
++	AUDIO_DEVICE_OUT_ANC_HEADPHONE,
++	AUDIO_DEVICE_OUT_PROXY,
++	AUDIO_DEVICE_OUT_FM,
++	AUDIO_DEVICE_OUT_FM_TX,
++	AUDIO_DEVICE_OUT_COUNT
++};
++#define AUDIO_DEVICE_COMBO 0x400000 /* bit 23 */
++
++enum {                  /* cache block */
++	CB_0 = 0,
++	CB_1,
++	CB_2,
++	CB_3,
++	CB_4,
++	CB_5,
++	CB_6,
++	CB_7,
++	CB_COUNT
++};
++
++enum {                  /* cache block description */
++	CBD_DEV_MASK = 0,
++	CBD_OFFSG,
++	CBD_CMD0,
++	CBD_SZ0,
++	CBD_OFFS1,
++	CBD_CMD1,
++	CBD_SZ1,
++	CBD_OFFS2,
++	CBD_CMD2,
++	CBD_SZ2,
++	CBD_OFFS3,
++	CBD_CMD3,
++	CBD_SZ3,
++	CBD_COUNT,
++};
++
++/* pr_debug */
++#define dts_eagle_drv_dbg_msg(fmt, ...)  \
++	(printk(KERN_INFO "DTS_EAGLE_DRIVER: " fmt "\n", ##__VA_ARGS__))
++
++/* pr_err */
++#define dts_eagle_drv_err_msg(fmt, ...)  \
++	(printk(KERN_INFO "DTS_EAGLE_DRIVER: " fmt "\n", ##__VA_ARGS__))
++
++/* dts eagle driver */
++static dev_t            dts_eagle_dev;
++static struct   cdev    dts_eagle_char_dev;
++static struct   class   *p_dts_eagle_class;
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 37)
++static DECLARE_MUTEX(lock);
++#else
++static DEFINE_SEMAPHORE(lock);
++#endif
++
++/* dts eagle parameter cache */
++#define DEPC_MAX_SIZE 524288
++
++static int _ref_cnt;
++static char *_depc;
++static u32 _depc_size;
++static s32 _c_bl[CB_COUNT][CBD_COUNT];
++static u32 _device_primary;
++static u32 _device_all;
++
++
++/*
++ * Internal functions
++ */
++static void _init_cb_descs(void)
++{
++	int i;
++
++	for (i = 0; i < CB_COUNT; i++) {
++		_c_bl[i][CBD_DEV_MASK] = 0;
++
++		_c_bl[i][CBD_OFFSG] = _c_bl[i][CBD_OFFS1] =
++		_c_bl[i][CBD_OFFS2] = _c_bl[i][CBD_OFFS3] = 0xFFFFFFFF;
++
++		_c_bl[i][CBD_CMD0] = _c_bl[i][CBD_SZ0] =
++		_c_bl[i][CBD_CMD1] = _c_bl[i][CBD_SZ1] =
++		_c_bl[i][CBD_CMD2] = _c_bl[i][CBD_SZ2] =
++		_c_bl[i][CBD_CMD3] = _c_bl[i][CBD_SZ3] = 0;
++	}
++}
++
++static s32 _get_cb_for_dev(int device)
++{
++	s32 i;
++
++	if (device & AUDIO_DEVICE_COMBO) {
++		for (i = 0; i < CB_COUNT; i++) {
++			if ((_c_bl[i][CBD_DEV_MASK] & device) == device)
++				return i;
++		}
++	} else {
++		for (i = 0; i < CB_COUNT; i++) {
++			if ((_c_bl[i][CBD_DEV_MASK] & device) &&
++			     !(_c_bl[i][CBD_DEV_MASK] & AUDIO_DEVICE_COMBO))
++				return i;
++		}
++	}
++	dts_eagle_drv_err_msg("%s: device %i not found", __func__, device);
++	return -EINVAL;
++}
++
++/*
++ * Driver functions
++ */
++static int dts_eagle_open(struct inode *i, struct file *f)
++{
++	dts_eagle_drv_dbg_msg("%s", __func__);
++	return 0;
++}
++
++static int dts_eagle_close(struct inode *i, struct file *f)
++{
++	dts_eagle_drv_dbg_msg("%s", __func__);
++	return 0;
++}
++
++static long dts_eagle_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
++{
++	down(&lock);
++	switch (cmd) {
++	case DTS_EAGLE_IOCTL_GET_CACHE_SIZE: {
++		dts_eagle_drv_dbg_msg("%s: called with control 0x%X (get param cache size)",
++			 __func__, cmd);
++
++		if (copy_to_user((void *)arg, &_depc_size, sizeof(_depc_size))) {
++			dts_eagle_drv_err_msg("%s: error writing size", __func__);
++			up(&lock);
++			return -EFAULT;
++		}
++		break;
++	}
++
++	case DTS_EAGLE_IOCTL_SET_CACHE_SIZE: {
++		s32 size = 0;
++
++		dts_eagle_drv_dbg_msg("%s: called with control 0x%X (allocate param cache)",
++			 __func__, cmd);
++
++		if (copy_from_user((void *)&size, (void *)arg, sizeof(size))) {
++			dts_eagle_drv_err_msg("%s: error copying size (src:%p, tgt:%p, size:%zu)",
++				__func__, (void *)arg, &size, sizeof(size));
++			up(&lock);
++			return -EFAULT;
++		} else if (size < 0 || size > DEPC_MAX_SIZE) {
++			dts_eagle_drv_err_msg("%s: cache size %d not allowed (min 0, max %d)",
++				 __func__, size, DEPC_MAX_SIZE);
++			up(&lock);
++			return -EINVAL;
++		}
++
++		if (_depc) {
++			dts_eagle_drv_dbg_msg("%s: previous param cache of size %u freed",
++				 __func__, _depc_size);
++			_depc_size = 0;
++			kfree(_depc);
++			_depc = NULL;
++		}
++
++		if (size)
++			_depc = kzalloc(size, GFP_KERNEL);
++		else
++			dts_eagle_drv_dbg_msg("%s: %d bytes requested for param cache, nothing allocated",
++				 __func__, size);
++
++		if (_depc) {
++			dts_eagle_drv_dbg_msg("%s: %d bytes allocated for param cache",
++				 __func__, size);
++			_depc_size = size;
++		} else {
++			dts_eagle_drv_err_msg("%s: error allocating param cache (kzalloc failed on %d bytes)",
++				__func__, size);
++			_depc_size = 0;
++			up(&lock);
++			return -ENOMEM;
++		}
++		break;
++	}
++
++	case DTS_EAGLE_IOCTL_GET_PARAM: {
++		struct dts_eagle_param_desc depd;
++		s32 offset = 0, cb = 0;
++		void *buf = NULL;
++
++		dts_eagle_drv_dbg_msg("%s: control 0x%X (get param)",
++			__func__, cmd);
++
++		if (copy_from_user((void *)&depd, (void *)arg, sizeof(depd))) {
++			dts_eagle_drv_err_msg("%s: error copying dts_eagle_param_desc (src:%p, tgt:%p, size:%zu)",
++				__func__, (void *)arg, &depd, sizeof(depd));
++			up(&lock);
++			return -EFAULT;
++		}
++
++		depd.device &= DTS_EAGLE_FLAG_IOCTL_MASK;
++		cb = _get_cb_for_dev(depd.device);
++		if (cb < 0) {
++			dts_eagle_drv_err_msg("%s: no cache for device %i found",
++				 __func__, depd.device);
++			up(&lock);
++			return -EINVAL;
++		}
++
++		offset = _c_bl[cb][CBD_OFFSG] + depd.offset;
++		if ((offset + depd.size) > _depc_size) {
++			dts_eagle_drv_err_msg("%s: invalid size %d and/or offset %d",
++				 __func__,
++			     depd.size, offset);
++			up(&lock);
++			return -EINVAL;
++		}
++		buf = (void *)&_depc[offset];
++
++		if (copy_to_user((void *)(((char *)arg) + sizeof(depd)),
++		     buf, depd.size)) {
++			dts_eagle_drv_err_msg("%s: error copying get data",
++				__func__);
++			up(&lock);
++			return -EFAULT;
++		}
++		break;
++	}
++
++	case DTS_EAGLE_IOCTL_SET_PARAM: {
++		struct dts_eagle_param_desc depd;
++		s32 offset = 0, just_set_cache = 0, for_pre = 0;
++		s32 tgt;
++
++		dts_eagle_drv_dbg_msg("%s: control 0x%X (set param)",
++			__func__, cmd);
++
++		if (copy_from_user((void *)&depd, (void *)arg, sizeof(depd))) {
++			dts_eagle_drv_err_msg("%s: error copying dts_eagle_param_desc (src:%p, tgt:%p, size:%zu)",
++				__func__, (void *)arg, &depd, sizeof(depd));
++			up(&lock);
++			return -EFAULT;
++		}
++
++		if (depd.device & DTS_EAGLE_FLAG_IOCTL_PRE) {
++			dts_eagle_drv_dbg_msg("%s: using for premix", __func__);
++			for_pre = 1;
++		}
++
++		if (depd.device & DTS_EAGLE_FLAG_IOCTL_JUSTSETCACHE) {
++			dts_eagle_drv_dbg_msg("%s: 'just set cache' requested",
++				__func__);
++			just_set_cache = 1;
++		}
++
++		depd.device &= DTS_EAGLE_FLAG_IOCTL_MASK;
++		tgt = _get_cb_for_dev(depd.device);
++		if (tgt < 0) {
++			dts_eagle_drv_err_msg("%s: no cache for device %i found",
++				 __func__, depd.device);
++			up(&lock);
++			return -EINVAL;
++		}
++
++		offset = _c_bl[tgt][CBD_OFFSG] + depd.offset;
++		if ((offset + depd.size) > _depc_size) {
++			dts_eagle_drv_err_msg("%s: invalid size %i and/or offset %i for parameter (target cache block %i with offset %i, global cache is size %u)",
++				 __func__, depd.size, offset, tgt,
++				 _c_bl[tgt][CBD_OFFSG], _depc_size);
++			up(&lock);
++			return -EINVAL;
++		}
++
++		if (copy_from_user((void *)&_depc[offset],
++		     (void *)(((char *)arg)+sizeof(depd)), depd.size)) {
++			dts_eagle_drv_err_msg("%s: error copying param to cache (src:%p, tgt:%p, size:%i)",
++				 __func__, ((char *)arg)+sizeof(depd),
++				 &_depc[offset], depd.size);
++			up(&lock);
++			return -EFAULT;
++		}
++
++		dts_eagle_drv_dbg_msg("%s: param info: param = 0x%X, size = %i, offset = %i, device = %i, cache block %i, global offset = %i, first bytes as integer = %i",
++			__func__, depd.id, depd.size, depd.offset, depd.device,
++			tgt, offset, *(int *)&_depc[offset]);
++
++		break;
++	}
++
++	case DTS_EAGLE_IOCTL_SET_CACHE_BLOCK: {
++		u32 b_[CBD_COUNT+1], *b = &b_[1], cb;
++
++		dts_eagle_drv_dbg_msg("%s: with control 0x%X (set cache block)",
++			 __func__, cmd);
++
++		if (copy_from_user((void *)b_, (void *)arg, sizeof(b_))) {
++			dts_eagle_drv_err_msg("%s: error copying cache block data (src:%p, tgt:%p, size:%zu)",
++				 __func__, (void *)arg, b_, sizeof(b_));
++			up(&lock);
++			return -EFAULT;
++		}
++
++		cb = b_[0];
++		if (cb >= CB_COUNT) {
++			dts_eagle_drv_err_msg("%s: cache block %u out of range (max %u)",
++				 __func__, cb, CB_COUNT-1);
++			up(&lock);
++			return -EINVAL;
++		}
++
++		dts_eagle_drv_dbg_msg("%s: cache block %i set: devices 0x%X, global offset %u, offsets 1:%u 2:%u 3:%u, cmds/sizes 0:0x%X %u 1:0x%X %u 2:0x%X %u 3:0x%X %u",
++			__func__, cb, _c_bl[cb][CBD_DEV_MASK],
++			_c_bl[cb][CBD_OFFSG], _c_bl[cb][CBD_OFFS1],
++			_c_bl[cb][CBD_OFFS2], _c_bl[cb][CBD_OFFS3],
++			_c_bl[cb][CBD_CMD0], _c_bl[cb][CBD_SZ0],
++			_c_bl[cb][CBD_CMD1], _c_bl[cb][CBD_SZ1],
++			_c_bl[cb][CBD_CMD2], _c_bl[cb][CBD_SZ2],
++			_c_bl[cb][CBD_CMD3], _c_bl[cb][CBD_SZ3]);
++
++		if ((b[CBD_OFFSG]+b[CBD_OFFS1]+b[CBD_SZ1]) > _depc_size ||
++		    (b[CBD_OFFSG]+b[CBD_OFFS2]+b[CBD_SZ2]) > _depc_size ||
++		    (b[CBD_OFFSG]+b[CBD_OFFS3]+b[CBD_SZ3]) > _depc_size) {
++			dts_eagle_drv_err_msg("%s: cache block bounds out of range", __func__);
++			up(&lock);
++			return -EINVAL;
++		}
++		memcpy(_c_bl[cb], b, sizeof(_c_bl[cb]));
++		break;
++	}
++
++	case DTS_EAGLE_IOCTL_SET_ACTIVE_DEVICE: {
++		u32 data[2];
++
++		dts_eagle_drv_dbg_msg("%s: with control 0x%X (set active device)",
++			 __func__, cmd);
++
++		if (copy_from_user((void *)data, (void *)arg, sizeof(data))) {
++			dts_eagle_drv_err_msg("%s: error copying active device data (src:%p, tgt:%p, size:%zu)",
++				 __func__, (void *)arg, data, sizeof(data));
++			up(&lock);
++			return -EFAULT;
++		}
++
++		if (data[1] != 0) {
++			_device_primary = data[0];
++			dts_eagle_drv_dbg_msg("%s: primary device %i",
++				__func__, data[0]);
++		} else {
++			_device_all = data[0];
++			dts_eagle_drv_dbg_msg("%s: all devices 0x%X",
++				__func__, data[0]);
++		}
++
++		break;
++	}
++
++	case DTS_EAGLE_IOCTL_GET_CACHE_PREMIX:{
++		int offset, cidx = -1, size;
++
++		dts_eagle_drv_dbg_msg("%s: control 0x%X (get param)",
++			__func__, cmd);
++
++		cidx = _get_cb_for_dev(_device_primary);
++		if (cidx < 0) {
++			up(&lock);
++			return -EINVAL;
++		}
++
++		offset = _c_bl[cidx][CBD_OFFSG];
++		cmd = _c_bl[cidx][CBD_CMD0];
++		size = _c_bl[cidx][CBD_SZ0] + _c_bl[cidx][CBD_SZ1];
++
++		if (_depc_size == 0 || !_depc || offset < 0 || size <= 0 ||
++		     cmd == 0 || (offset + size) > _depc_size) {
++			dts_eagle_drv_err_msg("%s: primary device %i cache index %i general error - cache size = %u, cache ptr = %p, offset = %i, size = %i, cmd = %i",
++				__func__, _device_primary, cidx, _depc_size,
++				_depc, offset, size, cmd);
++			up(&lock);
++			return -EINVAL;
++		}
++
++		dts_eagle_drv_dbg_msg("%s: first 6 integers %i %i %i %i %i %i",
++			__func__, *((int *)&_depc[offset]), *((int *)&_depc[offset+4]),
++			*((int *)&_depc[offset+8]), *((int *)&_depc[offset+12]),
++			*((int *)&_depc[offset+16]), *((int *)&_depc[offset+20]));
++
++		dts_eagle_drv_dbg_msg("%s: sending full data block, with cache index = %d device mask 0x%X, param = 0x%X, offset = %d, and size = %d",
++			 __func__, cidx, _c_bl[cidx][CBD_DEV_MASK],
++			 cmd, offset, size);
++
++		if (copy_to_user((void *)arg, &_depc[offset], size)) {
++			dts_eagle_drv_err_msg("%s: error copying premix data to userspace",
++				 __func__);
++			up(&lock);
++			return -EFAULT;
++		}
++		break;
++	}
++
++	case DTS_EAGLE_IOCTL_GET_CACHE_POSTMIX: {
++		int offset, cidx = -1, size;
++
++		dts_eagle_drv_dbg_msg("%s: control 0x%X (get param)",
++			__func__, cmd);
++
++		cidx = _get_cb_for_dev(_device_primary);
++		if (cidx < 0) {
++			up(&lock);
++			return -EINVAL;
++		}
++
++		offset = _c_bl[cidx][CBD_OFFSG] + _c_bl[cidx][CBD_OFFS2];
++		cmd = _c_bl[cidx][CBD_CMD2];
++		size = _c_bl[cidx][CBD_SZ2] + _c_bl[cidx][CBD_SZ3];
++
++		if (_depc_size == 0 || !_depc || offset < 0 || size <= 0 ||
++		     cmd == 0 || (offset + size) > _depc_size) {
++			dts_eagle_drv_err_msg("%s: primary device %i cache index %i general error - cache size = %u, cache ptr = %p, offset = %i, size = %i, cmd = %i",
++				__func__, _device_primary, cidx, _depc_size,
++				_depc, offset, size, cmd);
++			up(&lock);
++			return -EINVAL;
++		}
++
++		dts_eagle_drv_dbg_msg("%s: first 6 integers %i %i %i %i %i %i",
++			__func__, *((int *)&_depc[offset]), *((int *)&_depc[offset+4]),
++			*((int *)&_depc[offset+8]), *((int *)&_depc[offset+12]),
++			*((int *)&_depc[offset+16]), *((int *)&_depc[offset+20]));
++
++		dts_eagle_drv_dbg_msg("%s: sending full data block, with cache index = %d device mask 0x%X, param = 0x%X, offset = %d, and size = %d",
++			 __func__, cidx, _c_bl[cidx][CBD_DEV_MASK],
++			cmd, offset, size);
++
++		if (copy_to_user((void *)arg, &_depc[offset], size)) {
++			dts_eagle_drv_err_msg("%s: error copying postmix data to userspace",
++				 __func__);
++			up(&lock);
++			return -EFAULT;
++		}
++		break;
++	}
++
++	default:
++		dts_eagle_drv_err_msg("%s: control 0x%X (invalid control)",
++			__func__, cmd);
++		up(&lock);
++		return -EINVAL;
++	}
++
++	up(&lock);
++	return 0;
++}
++
++#ifdef CONFIG_COMPAT
++static long dts_eagle_compat_ioctl(struct file *f, unsigned int cmd,
++				   unsigned long arg)
++{
++	unsigned int retCmd = 0;
++
++	switch (cmd) {
++	case DTS_EAGLE_COMPAT_IOCTL_GET_CACHE_SIZE: {
++		retCmd = DTS_EAGLE_IOCTL_GET_CACHE_SIZE;
++		break;
++	}
++
++	case DTS_EAGLE_COMPAT_IOCTL_SET_CACHE_SIZE: {
++		retCmd = DTS_EAGLE_IOCTL_SET_CACHE_SIZE;
++		break;
++	}
++
++	case DTS_EAGLE_COMPAT_IOCTL_GET_PARAM: {
++		retCmd = DTS_EAGLE_IOCTL_GET_PARAM;
++		break;
++	}
++
++	case DTS_EAGLE_COMPAT_IOCTL_SET_PARAM: {
++		retCmd = DTS_EAGLE_IOCTL_SET_PARAM;
++		break;
++	}
++
++	case DTS_EAGLE_COMPAT_IOCTL_SET_CACHE_BLOCK: {
++		retCmd = DTS_EAGLE_IOCTL_SET_CACHE_BLOCK;
++		break;
++	}
++
++	case DTS_EAGLE_COMPAT_IOCTL_SET_ACTIVE_DEVICE: {
++		retCmd = DTS_EAGLE_IOCTL_SET_ACTIVE_DEVICE;
++		break;
++	}
++
++	case DTS_EAGLE_COMPAT_IOCTL_GET_LICENSE: {
++		retCmd = DTS_EAGLE_IOCTL_GET_LICENSE;
++		break;
++	}
++
++	case DTS_EAGLE_COMPAT_IOCTL_SET_LICENSE: {
++		retCmd = DTS_EAGLE_IOCTL_SET_LICENSE;
++		break;
++	}
++
++	case DTS_EAGLE_COMPAT_IOCTL_GET_CACHE_PREMIX:{
++		retCmd = DTS_EAGLE_IOCTL_GET_CACHE_PREMIX;
++		break;
++	}
++
++	case DTS_EAGLE_COMPAT_IOCTL_GET_CACHE_POSTMIX: {
++		retCmd = DTS_EAGLE_IOCTL_GET_CACHE_POSTMIX;
++		break;
++	}
++
++	default:
++		dts_eagle_drv_err_msg("%s: control 0x%X (invalid control)",
++		     __func__, cmd);
++		return -EINVAL;
++	}
++
++	return dts_eagle_ioctl(f, retCmd, arg);
++}
++#endif
++
++static const struct file_operations dts_eagle_fops = {
++	.owner          =   THIS_MODULE,
++	.open           =   dts_eagle_open,
++	.release        =   dts_eagle_close,
++	.unlocked_ioctl =   dts_eagle_ioctl,
++#ifdef CONFIG_COMPAT
++	.compat_ioctl   =   dts_eagle_compat_ioctl,
++#endif
++};
++
++static int __init dts_eagle_drv_init(void)
++{
++	int ret;
++	struct device *dev_ret;
++
++	dts_eagle_drv_dbg_msg("%s", __func__);
++	printk(KERN_INFO "dts_eagle\n");
++
++	ret = alloc_chrdev_region(&dts_eagle_dev,
++		DTS_EAGLE_DRIVER_FIRST_MINOR, DTS_EAGLE_DRIVER_MINOR_CNT,
++	     "dts_eagle_ioctl");
++
++	if (ret < 0)
++		return ret;
++
++	cdev_init(&dts_eagle_char_dev, &dts_eagle_fops);
++
++	ret = cdev_add(&dts_eagle_char_dev, dts_eagle_dev,
++		DTS_EAGLE_DRIVER_MINOR_CNT);
++
++	if (ret < 0)
++		return ret;
++
++	ret = IS_ERR(p_dts_eagle_class = class_create(THIS_MODULE, "char"));
++
++	if (ret) {
++		cdev_del(&dts_eagle_char_dev);
++		unregister_chrdev_region(dts_eagle_dev,
++			DTS_EAGLE_DRIVER_MINOR_CNT);
++
++		return PTR_ERR(p_dts_eagle_class);
++	}
++
++	ret = IS_ERR(dev_ret = device_create(p_dts_eagle_class, NULL,
++		dts_eagle_dev, NULL, "dts_eagle"));
++
++	if (ret) {
++		class_destroy(p_dts_eagle_class);
++		cdev_del(&dts_eagle_char_dev);
++		unregister_chrdev_region(dts_eagle_dev,
++			DTS_EAGLE_DRIVER_MINOR_CNT);
++
++		return PTR_ERR(dev_ret);
++	}
++
++	if (!_ref_cnt++)
++		_init_cb_descs();
++
++	return 0;
++}
++
++static void __exit dts_eagle_drv_exit(void)
++{
++	device_destroy(p_dts_eagle_class, dts_eagle_dev);
++	class_destroy(p_dts_eagle_class);
++	cdev_del(&dts_eagle_char_dev);
++	unregister_chrdev_region(dts_eagle_dev, DTS_EAGLE_DRIVER_MINOR_CNT);
++
++	dts_eagle_drv_dbg_msg("%s", __func__);
++	--_ref_cnt;
++}
++
++module_init(dts_eagle_drv_init);
++module_exit(dts_eagle_drv_exit);
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Magesh Devaprakash <magesh.devaprakash@dts.com>");
++MODULE_DESCRIPTION("dts eagle drv() char driver");
++
++/* DTS_EAGLE END */
+diff --git a/drivers/misc/qcom/qdsp6v2/dts_eagle/dts_eagle_drv.h b/drivers/misc/qcom/qdsp6v2/dts_eagle/dts_eagle_drv.h
+new file mode 100644
+index 00000000..719df37d
+--- /dev/null
++++ b/drivers/misc/qcom/qdsp6v2/dts_eagle/dts_eagle_drv.h
+@@ -0,0 +1,54 @@
++/* DTS_EAGLE START */
++
++#ifndef DTS_EAGLE_DRV_H
++#define DTS_EAGLE_DRV_H
++
++
++#include <linux/compat.h>
++#include <linux/ioctl.h>
++
++#define EAGLE_DRIVER_ID 0xF2
++
++#ifdef CONFIG_COMPAT
++    #define DTS_EAGLE_COMPAT_IOCTL_GET_CACHE_SIZE           _IOR(EAGLE_DRIVER_ID, 0, __s32)
++    #define DTS_EAGLE_COMPAT_IOCTL_SET_CACHE_SIZE           _IOW(EAGLE_DRIVER_ID, 1, __s32)
++    #define DTS_EAGLE_COMPAT_IOCTL_GET_PARAM                _IOR(EAGLE_DRIVER_ID, 2, compat_uptr_t)
++    #define DTS_EAGLE_COMPAT_IOCTL_SET_PARAM                _IOW(EAGLE_DRIVER_ID, 3, compat_uptr_t)
++    #define DTS_EAGLE_COMPAT_IOCTL_SET_CACHE_BLOCK          _IOW(EAGLE_DRIVER_ID, 4, compat_uptr_t)
++    #define DTS_EAGLE_COMPAT_IOCTL_SET_ACTIVE_DEVICE        _IOW(EAGLE_DRIVER_ID, 5, compat_uptr_t)
++    #define DTS_EAGLE_COMPAT_IOCTL_GET_LICENSE              _IOR(EAGLE_DRIVER_ID, 6, compat_uptr_t)
++    #define DTS_EAGLE_COMPAT_IOCTL_SET_LICENSE              _IOW(EAGLE_DRIVER_ID, 7, compat_uptr_t)
++    #define DTS_EAGLE_COMPAT_IOCTL_SEND_LICENSE             _IOW(EAGLE_DRIVER_ID, 8, __s32)
++    #define DTS_EAGLE_COMPAT_IOCTL_SET_VOLUME_COMMANDS      _IOW(EAGLE_DRIVER_ID, 9, compat_uptr_t)
++    #define DTS_EAGLE_COMPAT_IOCTL_GET_CACHE_PREMIX         _IOR(EAGLE_DRIVER_ID, 10, compat_uptr_t)
++    #define DTS_EAGLE_COMPAT_IOCTL_GET_CACHE_POSTMIX        _IOR(EAGLE_DRIVER_ID, 11, compat_uptr_t)
++#endif
++
++#define DTS_EAGLE_IOCTL_GET_CACHE_SIZE                      _IOR(EAGLE_DRIVER_ID, 0, int)
++#define DTS_EAGLE_IOCTL_SET_CACHE_SIZE                      _IOW(EAGLE_DRIVER_ID, 1, int)
++#define DTS_EAGLE_IOCTL_GET_PARAM                           _IOR(EAGLE_DRIVER_ID, 2, void*)
++#define DTS_EAGLE_IOCTL_SET_PARAM                           _IOW(EAGLE_DRIVER_ID, 3, void*)
++#define DTS_EAGLE_IOCTL_SET_CACHE_BLOCK                     _IOW(EAGLE_DRIVER_ID, 4, void*)
++#define DTS_EAGLE_IOCTL_SET_ACTIVE_DEVICE                   _IOW(EAGLE_DRIVER_ID, 5, void*)
++#define DTS_EAGLE_IOCTL_GET_LICENSE                         _IOR(EAGLE_DRIVER_ID, 6, void*)
++#define DTS_EAGLE_IOCTL_SET_LICENSE                         _IOW(EAGLE_DRIVER_ID, 7, void*)
++#define DTS_EAGLE_IOCTL_SEND_LICENSE                        _IOW(EAGLE_DRIVER_ID, 8, int)
++#define DTS_EAGLE_IOCTL_SET_VOLUME_COMMANDS                 _IOW(EAGLE_DRIVER_ID, 9, void*)
++#define DTS_EAGLE_IOCTL_GET_CACHE_PREMIX                    _IOR(EAGLE_DRIVER_ID, 10, void*)
++#define DTS_EAGLE_IOCTL_GET_CACHE_POSTMIX                   _IOR(EAGLE_DRIVER_ID, 11, void*)
++
++
++#define DTS_EAGLE_FLAG_IOCTL_PRE                            (1<<30)
++#define DTS_EAGLE_FLAG_IOCTL_JUSTSETCACHE                   (1<<31)
++#define DTS_EAGLE_FLAG_IOCTL_GETFROMCORE                    DTS_EAGLE_FLAG_IOCTL_JUSTSETCACHE
++#define DTS_EAGLE_FLAG_IOCTL_MASK                           (~(DTS_EAGLE_FLAG_IOCTL_PRE | DTS_EAGLE_FLAG_IOCTL_JUSTSETCACHE))
++
++struct dts_eagle_param_desc {
++	uint32_t        id;
++	uint32_t        size;
++	int32_t         offset;
++	uint32_t        device;
++} __packed;
++
++#endif
++/* DTS_EAGLE END */
+diff --git a/include/sound/audio_calibration.h b/include/sound/audio_calibration.h
+index 5f6b5e37..1f02f249 100644
+--- a/include/sound/audio_calibration.h
++++ b/include/sound/audio_calibration.h
+@@ -34,6 +34,13 @@ struct audio_cal_reg {
+ 	struct audio_cal_callbacks	callbacks;
+ };
+ 
++/* ASUS_BSP Eric +++ */
++struct headset_imp_val {
++	uint32_t	ZL;
++	uint32_t	ZR;
++};
++/* ASUS_BSP Eric --- */
++
+ int audio_cal_register(int num_cal_types, struct audio_cal_reg *reg_data);
+ int audio_cal_deregister(int num_cal_types, struct audio_cal_reg *reg_data);
+ 
+diff --git a/include/sound/msm-dts-eagle.h b/include/sound/msm-dts-eagle.h
+new file mode 100644
+index 00000000..2ef01136
+--- /dev/null
++++ b/include/sound/msm-dts-eagle.h
+@@ -0,0 +1,148 @@
++/* Copyright (c) 2014, The Linux Foundation. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++
++#ifndef __MSM_DTS_EAGLE_H__
++#define __MSM_DTS_EAGLE_H__
++
++#include <linux/compat.h>
++#include <sound/soc.h>
++#include <sound/devdep_params.h>
++#include <sound/q6asm-v2.h>
++
++#ifdef CONFIG_COMPAT
++enum {
++	DTS_EAGLE_IOCTL_GET_CACHE_SIZE32 = _IOR(0xF2, 0, __s32),
++	DTS_EAGLE_IOCTL_SET_CACHE_SIZE32 = _IOW(0xF2, 1, __s32),
++	DTS_EAGLE_IOCTL_GET_PARAM32 = _IOR(0xF2, 2, compat_uptr_t),
++	DTS_EAGLE_IOCTL_SET_PARAM32 = _IOW(0xF2, 3, compat_uptr_t),
++	DTS_EAGLE_IOCTL_SET_CACHE_BLOCK32 =
++				_IOW(0xF2, 4, compat_uptr_t),
++	DTS_EAGLE_IOCTL_SET_ACTIVE_DEVICE32 =
++				_IOW(0xF2, 5, compat_uptr_t),
++	DTS_EAGLE_IOCTL_GET_LICENSE32 =
++				_IOR(0xF2, 6, compat_uptr_t),
++	DTS_EAGLE_IOCTL_SET_LICENSE32 =
++				 _IOW(0xF2, 7, compat_uptr_t),
++	DTS_EAGLE_IOCTL_SEND_LICENSE32 = _IOW(0xF2, 8, __s32),
++	DTS_EAGLE_IOCTL_SET_VOLUME_COMMANDS32 = _IOW(0xF2, 9,
++						     compat_uptr_t),
++};
++#endif
++
++#ifdef CONFIG_DTS_EAGLE
++void msm_dts_ion_memmap(struct param_outband *po_);
++int msm_dts_eagle_enable_asm(struct audio_client *ac, u32 enable, int module);
++int msm_dts_eagle_enable_adm(int port_id, int copp_idx, u32 enable);
++void msm_dts_eagle_add_controls(struct snd_soc_platform *platform);
++int msm_dts_eagle_set_stream_gain(struct audio_client *ac,
++				  int lgain, int rgain);
++int msm_dts_eagle_handle_asm(struct dts_eagle_param_desc *depd, char *buf,
++			     bool for_pre, bool get, struct audio_client *ac,
++			     struct param_outband *po);
++int msm_dts_eagle_handle_adm(struct dts_eagle_param_desc *depd, char *buf,
++			     bool for_pre, bool get);
++int msm_dts_eagle_ioctl(unsigned int cmd, unsigned long arg);
++int msm_dts_eagle_is_hpx_on(void);
++int msm_dts_eagle_init_pre(struct audio_client *ac);
++int msm_dts_eagle_deinit_pre(struct audio_client *ac);
++int msm_dts_eagle_init_post(int port_id, int copp_id);
++int msm_dts_eagle_deinit_post(int port_id, int topology);
++int msm_dts_eagle_init_master_module(struct audio_client *ac);
++int msm_dts_eagle_deinit_master_module(struct audio_client *ac);
++int msm_dts_eagle_pcm_new(struct snd_soc_pcm_runtime *runtime);
++void msm_dts_eagle_pcm_free(struct snd_pcm *pcm);
++int msm_dts_eagle_compat_ioctl(unsigned int cmd, unsigned long arg);
++#else
++static inline void msm_dts_ion_memmap(struct param_outband *po_)
++{
++	pr_debug("%s\n", __func__);
++}
++static inline int msm_dts_eagle_enable_asm(struct audio_client *ac,
++					   u32 enable, int module)
++{
++	return 0;
++}
++static inline int msm_dts_eagle_enable_adm(int port_id, int copp_idx,
++					   u32 enable)
++{
++	return 0;
++}
++static inline void msm_dts_eagle_add_controls(struct snd_soc_platform *platform)
++{
++}
++static inline int msm_dts_eagle_set_stream_gain(struct audio_client *ac,
++						int lgain, int rgain)
++{
++	pr_debug("%s\n", __func__);
++	return 0;
++}
++static inline int msm_dts_eagle_handle_asm(struct dts_eagle_param_desc *depd,
++					   char *buf, bool for_pre, bool get,
++					   struct audio_client *ac,
++					   struct param_outband *po)
++{
++	return 0;
++}
++static inline int msm_dts_eagle_handle_adm(struct dts_eagle_param_desc *depd,
++					   char *buf, bool for_pre, bool get)
++{
++	return 0;
++}
++static inline int msm_dts_eagle_ioctl(unsigned int cmd, unsigned long arg)
++{
++	return -EPERM;
++}
++static inline int msm_dts_eagle_is_hpx_on(void)
++{
++	return 0;
++}
++static inline int msm_dts_eagle_init_pre(struct audio_client *ac)
++{
++	return 0;
++}
++static inline int msm_dts_eagle_deinit_pre(struct audio_client *ac)
++{
++	return 0;
++}
++static inline int msm_dts_eagle_init_post(int port_id, int coppid)
++{
++	return 0;
++}
++static inline int msm_dts_eagle_deinit_post(int port_id, int topology)
++{
++	return 0;
++}
++static inline int msm_dts_eagle_init_master_module(struct audio_client *ac)
++{
++	return 0;
++}
++static inline int msm_dts_eagle_deinit_master_module(struct audio_client *ac)
++{
++	return 0;
++}
++static inline int msm_dts_eagle_pcm_new(struct snd_soc_pcm_runtime *runtime)
++{
++	pr_debug("%s\n", __func__);
++	return 0;
++}
++static inline void msm_dts_eagle_pcm_free(struct snd_pcm *pcm)
++{
++	pr_debug("%s\n", __func__);
++}
++static inline int msm_dts_eagle_compat_ioctl(unsigned int cmd,
++					unsigned long arg)
++{
++	return 0;
++}
++#endif
++
++#endif
+diff --git a/include/sound/q6adm-v2.h b/include/sound/q6adm-v2.h
+index 2b75bd4a..19daccf4 100644
+--- a/include/sound/q6adm-v2.h
++++ b/include/sound/q6adm-v2.h
+@@ -36,6 +36,7 @@ enum {
+ 	ADM_AUDVOL_CAL,
+ 	ADM_RTAC_INFO_CAL,
+ 	ADM_RTAC_APR_CAL,
++	ADM_DTS_EAGLE,
+ 	ADM_SRS_TRUMEDIA,
+ 	ADM_RTAC_AUDVOL_CAL,
+ 	ADM_MAX_CAL_TYPES
+diff --git a/include/uapi/linux/msm_audio_calibration.h b/include/uapi/linux/msm_audio_calibration.h
+index 3c6ab13c..1ea78d4b 100644
+--- a/include/uapi/linux/msm_audio_calibration.h
++++ b/include/uapi/linux/msm_audio_calibration.h
+@@ -44,6 +44,20 @@
+ 							217, void *)
+ #define AUDIO_SET_RTAC_AFE_CAL		_IOWR(CAL_IOCTL_MAGIC, \
+ 							218, void *)
++
++/* ASUS_BSP Paul +++ */
++#define AUDIO_SET_AUDIOWIZARD_FORCE_PRESET	_IOWR(CAL_IOCTL_MAGIC, \
++							221, void *)
++/* ASUS_BSP Paul --- */
++
++/* ASUS_BSP */
++#define AUDIO_GET_HS_IMP			_IOWR(CAL_IOCTL_MAGIC, \
++							230, void *)
++#define AUDIO_SET_MODE _IOWR(CAL_IOCTL_MAGIC, 225, void *)
++extern int get_audiomode(void);
++#define AUDIO_SET_FORMAT _IOWR(CAL_IOCTL_MAGIC, 231, void *)
++extern int get_audioformat(void);
++
+ enum {
+ 	CVP_VOC_RX_TOPOLOGY_CAL_TYPE = 0,
+ 	CVP_VOC_TX_TOPOLOGY_CAL_TYPE,
+@@ -95,6 +109,13 @@ enum {
+ 	CORE_CUSTOM_TOPOLOGIES_CAL_TYPE,
+ 	ADM_RTAC_AUDVOL_CAL_TYPE,
+ 
++	/* ASUS_BSP */
++	AUDIOWIZARD_FORCE_PRESET_TYPE,
++	SKYPE_STATE_TYPE,
++	SET_MODE_TYPE,
++       SET_FORMAT_TYPE,
++	GET_IMP_TYPE,
++
+ 	ULP_LSM_TOPOLOGY_ID_CAL_TYPE,
+ 	AFE_FB_SPKR_PROT_TH_VI_CAL_TYPE,
+ 	AFE_FB_SPKR_PROT_EX_VI_CAL_TYPE,
+diff --git a/sound/soc/codecs/wcd-mbhc-v2.c b/sound/soc/codecs/wcd-mbhc-v2.c
+index e3066412..880d1b6b 100644
+--- a/sound/soc/codecs/wcd-mbhc-v2.c
++++ b/sound/soc/codecs/wcd-mbhc-v2.c
+@@ -56,6 +56,16 @@
+ #define ANC_DETECT_RETRY_CNT 7
+ #define WCD_MBHC_SPL_HS_CNT  2
+ 
++/* ASUS_BSP Paul +++ */
++int g_jack_det_invert = 0;
++extern int g_DebugMode;
++/* ASUS_BSP Paul --- */
++
++/* ASUS_BSP Eric +++*/
++uint32_t g_ZL = 0;
++uint32_t g_ZR = 0;
++/* ASUS_BSP Eric ---*/
++
+ static int det_extn_cable_en;
+ module_param(det_extn_cable_en, int,
+ 		S_IRUGO | S_IWUSR | S_IWGRP);
+@@ -688,6 +698,12 @@ static void wcd_mbhc_report_plug(struct wcd_mbhc *mbhc, int insertion,
+ 			(!is_pa_on)) {
+ 				mbhc->mbhc_cb->compute_impedance(mbhc,
+ 						&mbhc->zl, &mbhc->zr);
++			/* ASUS_BSP Eric +++*/
++			g_ZL = mbhc->zl;
++			g_ZR = mbhc->zr;
++			printk("wcd_mbhc_v2 : print hs_imp_val : LL = %d , RR = %d\n",g_ZL, g_ZR);
++			/* ASUS_BSP Eric ---*/
++
+ 			if ((mbhc->zl > mbhc->mbhc_cfg->linein_th &&
+ 				mbhc->zl < MAX_IMPED) &&
+ 				(mbhc->zr > mbhc->mbhc_cfg->linein_th &&
+@@ -1519,6 +1535,11 @@ static void wcd_mbhc_swch_irq_handler(struct wcd_mbhc *mbhc)
+ 			mbhc->current_plug, detection_type);
+ 	wcd_cancel_hs_detect_plug(mbhc, &mbhc->correct_plug_swch);
+ 
++	/* ASUS_BSP Paul +++ */
++	if (g_DebugMode)
++		goto exit;
++	/* ASUS_BSP Paul --- */
++
+ 	if (mbhc->mbhc_cb->micbias_enable_status)
+ 		micbias1 = mbhc->mbhc_cb->micbias_enable_status(mbhc,
+ 						MIC_BIAS_1);
+@@ -1624,6 +1645,7 @@ static void wcd_mbhc_swch_irq_handler(struct wcd_mbhc *mbhc)
+ 
+ 	}
+ 
++exit: /* ASUS_BSP Paul +++ */
+ 	mbhc->in_swch_irq_handler = false;
+ 	WCD_MBHC_RSC_UNLOCK(mbhc);
+ 	pr_debug("%s: leave\n", __func__);
+@@ -1647,6 +1669,51 @@ static irqreturn_t wcd_mbhc_mech_plug_detect_irq(int irq, void *data)
+ 	return r;
+ }
+ 
++/* ASUS_BSP Paul +++ */
++void wcd_mbhc_plug_detect_for_debug_mode(struct wcd_mbhc *mbhc, int debug_mode)
++{
++	if (debug_mode) {
++		if (mbhc->current_plug != MBHC_PLUG_TYPE_NONE) {
++			printk("%s: current_plug != MBHC_PLUG_TYPE_NONE, force removal\n", __func__);
++			mbhc->mbhc_cb->lock_sleep(mbhc, true);
++			wcd_mbhc_swch_irq_handler(mbhc);
++			mbhc->mbhc_cb->lock_sleep(mbhc, false);
++			g_jack_det_invert = 1;
++		}
++		mbhc->mbhc_cb->irq_control(mbhc->codec, mbhc->intr_ids->mbhc_btn_press_intr, false);
++		mbhc->mbhc_cb->irq_control(mbhc->codec, mbhc->intr_ids->mbhc_btn_release_intr, false);
++		mbhc->mbhc_cb->irq_control(mbhc->codec, mbhc->intr_ids->hph_left_ocp, false);
++		mbhc->mbhc_cb->irq_control(mbhc->codec, mbhc->intr_ids->hph_right_ocp, false);
++	} else {
++		bool detection_type;
++		mbhc->mbhc_cb->irq_control(mbhc->codec, mbhc->intr_ids->mbhc_btn_press_intr, true);
++		mbhc->mbhc_cb->irq_control(mbhc->codec, mbhc->intr_ids->mbhc_btn_release_intr, true);
++		mbhc->mbhc_cb->irq_control(mbhc->codec, mbhc->intr_ids->hph_left_ocp, true);
++		mbhc->mbhc_cb->irq_control(mbhc->codec, mbhc->intr_ids->hph_right_ocp, true);
++		WCD_MBHC_REG_READ(WCD_MBHC_MECH_DETECTION_TYPE, detection_type);
++		if (!g_jack_det_invert && !detection_type) {
++			printk("%s: g_jack_det_invert == 0, detect plug type\n", __func__);
++			WCD_MBHC_REG_UPDATE_BITS(WCD_MBHC_MECH_DETECTION_TYPE,
++					!detection_type);
++			mbhc->mbhc_cb->lock_sleep(mbhc, true);
++			wcd_mbhc_swch_irq_handler(mbhc);
++			mbhc->mbhc_cb->lock_sleep(mbhc, false);
++		} else if (g_jack_det_invert && !detection_type) {
++			printk("%s: current_plug == MBHC_PLUG_TYPE_NONE\n", __func__);
++			WCD_MBHC_REG_UPDATE_BITS(WCD_MBHC_MECH_DETECTION_TYPE,
++					!detection_type);
++		} else if (g_jack_det_invert && detection_type) {
++			printk("%s: g_jack_det_invert == 1, detect plug type\n", __func__);
++			mbhc->mbhc_cb->lock_sleep(mbhc, true);
++			wcd_mbhc_swch_irq_handler(mbhc);
++			mbhc->mbhc_cb->lock_sleep(mbhc, false);
++		}
++		g_jack_det_invert = 0;
++	}
++}
++EXPORT_SYMBOL(wcd_mbhc_plug_detect_for_debug_mode);
++/* ASUS_BSP Paul --- */
++
+ static int wcd_mbhc_get_button_mask(struct wcd_mbhc *mbhc)
+ {
+ 	int mask = 0;
+diff --git a/sound/soc/codecs/wcd-mbhc-v2.h b/sound/soc/codecs/wcd-mbhc-v2.h
+index ac70288c..ff148b54 100644
+--- a/sound/soc/codecs/wcd-mbhc-v2.h
++++ b/sound/soc/codecs/wcd-mbhc-v2.h
+@@ -482,6 +482,8 @@ struct wcd_mbhc {
+ 	(cfg_ptr->_n_rload * \
+ 	(sizeof(cfg_ptr->_rload[0]) + sizeof(cfg_ptr->_alpha[0]))))
+ 
++void wcd_mbhc_plug_detect_for_debug_mode(struct wcd_mbhc *mbhc, int debug_mode); /* ASUS_BSP Paul +++ */
++
+ #ifdef CONFIG_SND_SOC_WCD_MBHC
+ int wcd_mbhc_set_keycode(struct wcd_mbhc *mbhc);
+ int wcd_mbhc_start(struct wcd_mbhc *mbhc,
+diff --git a/sound/soc/codecs/wcd9335.c b/sound/soc/codecs/wcd9335.c
+index 23236ae8..401421ad 100644
+--- a/sound/soc/codecs/wcd9335.c
++++ b/sound/soc/codecs/wcd9335.c
+@@ -44,6 +44,9 @@
+ #include "wcd9xxx-resmgr-v2.h"
+ #include "wcd_cpe_core.h"
+ #include "wcdcal-hwdep.h"
++#include <linux/proc_fs.h>
++#include <../drivers/base/regmap/internal.h>
++#include <linux/switch.h>
+ 
+ #define TASHA_RX_PORT_START_NUMBER  16
+ 
+@@ -138,6 +141,8 @@ static int cpe_debug_mode;
+ #define DAPM_MICBIAS3_STANDALONE "MIC BIAS3 Standalone"
+ #define DAPM_MICBIAS4_STANDALONE "MIC BIAS4 Standalone"
+ 
++int g_DebugMode = 0;
++struct switch_dev *g_audiowizard_force_preset_sdev = NULL;
+ #define DAPM_LDO_H_STANDALONE "LDO_H"
+ module_param(cpe_debug_mode, int,
+ 	     S_IRUGO | S_IWUSR | S_IWGRP);
+@@ -13973,6 +13978,20 @@ static int tasha_codec_probe(struct snd_soc_codec *codec)
+ 	if (pdata->wcd9xxx_mic_tristate)
+ 		tasha_set_high_impedance_mode(codec);
+ 
++	/* ASUS_BSP Paul +++ */
++        if (!g_audiowizard_force_preset_sdev) {
++		g_audiowizard_force_preset_sdev = kzalloc(sizeof(struct switch_dev), GFP_KERNEL);
++		if (!g_audiowizard_force_preset_sdev) {
++			pr_err("%s: failed to allocate switch_dev\n", __func__);
++			ret = -ENOMEM;
++		}
++		g_audiowizard_force_preset_sdev->name = "audiowizard_force_preset";
++		g_audiowizard_force_preset_sdev->state = 0;
++		ret = switch_dev_register(g_audiowizard_force_preset_sdev);
++		if (ret < 0)
++			pr_err("%s: failed to register switch audiowizard_force_preset\n", __func__);
++	}
++	/* ASUS_BSP Paul --- */
+ 	return ret;
+ 
+ err_pdata:
+diff --git a/sound/soc/msm/qdsp6v2/Makefile b/sound/soc/msm/qdsp6v2/Makefile
+index ea8650b1..11d31187 100644
+--- a/sound/soc/msm/qdsp6v2/Makefile
++++ b/sound/soc/msm/qdsp6v2/Makefile
+@@ -12,6 +12,7 @@ obj-$(CONFIG_SND_SOC_QDSP6V2) += snd-soc-qdsp6v2.o msm-pcm-dtmf-v2.o \
+ obj-$(CONFIG_SND_SOC_QDSP6V2_VM) += snd-soc-qdsp6v2.o msm-pcm-dtmf-v2.o \
+ 				 msm-dai-stub-v2.o
+ obj-$(CONFIG_SND_HWDEP) += msm-pcm-routing-devdep.o
++obj-$(CONFIG_DTS_EAGLE) += msm-dts-eagle.o
+ obj-$(CONFIG_DOLBY_DAP) += msm-dolby-dap-config.o
+ obj-$(CONFIG_DOLBY_DS2) += msm-ds2-dap-config.o
+ obj-$(CONFIG_DTS_SRS_TM) += msm-dts-srs-tm-config.o
+diff --git a/sound/soc/msm/qdsp6v2/audio_calibration.c b/sound/soc/msm/qdsp6v2/audio_calibration.c
+index 2a1b3477..770ce616 100644
+--- a/sound/soc/msm/qdsp6v2/audio_calibration.c
++++ b/sound/soc/msm/qdsp6v2/audio_calibration.c
+@@ -21,6 +21,11 @@
+ #include <sound/audio_calibration.h>
+ #include <sound/audio_cal_utils.h>
+ 
++#include <linux/switch.h>
++#include <sound/soc.h>
++#include "../../codecs/wcd9335.h"
++#include "../../codecs/wcd-mbhc-v2.h"
++
+ struct audio_cal_client_info {
+ 	struct list_head		list;
+ 	struct audio_cal_callbacks	*callbacks;
+@@ -35,6 +40,15 @@ struct audio_cal_info {
+ 
+ static struct audio_cal_info	audio_cal;
+ 
++/* ASUS_BSP */
++int g_audiowizard_force_preset_state = 0;
++int g_skype_state = 0;
++extern struct switch_dev *g_audiowizard_force_preset_sdev;
++extern uint32_t g_ZL;
++extern uint32_t g_ZR;
++int audio_mode = -1;
++int mode = -1;
++int audio_24bit = 0;
+ 
+ static bool callbacks_are_equal(struct audio_cal_callbacks *callback1,
+ 				struct audio_cal_callbacks *callback2)
+@@ -392,6 +406,9 @@ static long audio_cal_shared_ioctl(struct file *file, unsigned int cmd,
+ 	int				ret = 0;
+ 	int32_t				size;
+ 	struct audio_cal_basic		*data = NULL;
++	/* ASUS_BSP */
++	struct audio_codec_reg *codec_reg = NULL;
++	struct headset_imp_val *imp_val = NULL;
+ 	pr_debug("%s\n", __func__);
+ 
+ 	switch (cmd) {
+@@ -402,6 +419,79 @@ static long audio_cal_shared_ioctl(struct file *file, unsigned int cmd,
+ 	case AUDIO_GET_CALIBRATION:
+ 	case AUDIO_POST_CALIBRATION:
+ 		break;
++	/* ASUS_BSP */
++	case AUDIO_SET_AUDIOWIZARD_FORCE_PRESET:
++		mutex_lock(&audio_cal.cal_mutex[AUDIOWIZARD_FORCE_PRESET_TYPE]);
++		if (copy_from_user(&g_audiowizard_force_preset_state, (void *)arg,
++				sizeof(g_audiowizard_force_preset_state))) {
++			pr_err("%s: Could not copy g_audiowizard_force_preset_state from user\n", __func__);
++			ret = -EFAULT;
++		}
++		switch_set_state(g_audiowizard_force_preset_sdev, g_audiowizard_force_preset_state);
++		mutex_unlock(&audio_cal.cal_mutex[AUDIOWIZARD_FORCE_PRESET_TYPE]);
++		goto done;
++	case AUDIO_GET_HS_IMP:
++		printk("AUDIO_GET_HS_IMP : start\n");
++		mutex_lock(&audio_cal.cal_mutex[GET_IMP_TYPE]);
++		imp_val = kmalloc(sizeof(struct headset_imp_val), GFP_KERNEL);
++		if (imp_val == NULL) {
++			//pr_err("%s: could not allocated codec_reg!\n", __func__);
++			printk("%s: could not allocated codec_reg!\n", __func__);
++			ret = -ENOMEM;
++			mutex_unlock(&audio_cal.cal_mutex[GET_IMP_TYPE]);
++			goto done;
++		}
++		if (copy_from_user(imp_val, (void *)arg,
++				sizeof(struct headset_imp_val))) {
++			//pr_err("%s: Could not copy codec_reg from user\n", __func__);
++			printk("%s: Could not copy codec_reg from user\n", __func__);
++			ret = -EFAULT;
++			mutex_unlock(&audio_cal.cal_mutex[GET_IMP_TYPE]);
++			goto done;
++		}
++/*
++		if ( g_tasha->mbhc.current_plug == MBHC_PLUG_TYPE_NONE ||
++			g_tasha->mbhc.current_plug  == MBHC_PLUG_TYPE_INVALID ) {
++			//pr_err("%s: headset not plugin or invalid plug\n", __func__);
++			printk("%s: headset not plugin or invalid plug\n", __func__);
++			ret = -EINVAL;
++			mutex_unlock(&audio_cal.cal_mutex[GET_IMP_TYPE]);
++			goto done;
++		}
++*/
++		imp_val->ZL = g_ZL;
++		imp_val->ZR = g_ZR;
++		printk("%s: RR = %d , LL = %d\n", __func__ , imp_val->ZR , imp_val->ZL);
++		if (copy_to_user((void *)arg, imp_val,
++				sizeof(struct headset_imp_val))) {
++			//pr_err("%s: Could not copy imp_val to user\n", __func__);
++			printk("%s: Could not copy imp_val to user\n", __func__);
++			ret = -EFAULT;
++		}
++		mutex_unlock(&audio_cal.cal_mutex[GET_IMP_TYPE]);
++		printk("AUDIO_GET_HS_IMP : done\n");
++		goto done;
++	 case AUDIO_SET_MODE:
++        mutex_lock(&audio_cal.cal_mutex[SET_MODE_TYPE]);
++        if(copy_from_user(&mode, (void *)arg,sizeof(mode))) {
++            pr_err("%s: Could not copy lmode to user\n", __func__);
++            ret = -EFAULT;			
++        }
++		
++        audio_mode = mode;
++        printk("%s: Audio mode status:audio_mode=%d\n",__func__,audio_mode);
++        mutex_unlock(&audio_cal.cal_mutex[SET_MODE_TYPE]);
++        goto done;
++	 case AUDIO_SET_FORMAT:
++        mutex_lock(&audio_cal.cal_mutex[SET_FORMAT_TYPE]);
++        if(copy_from_user(&audio_24bit, (void *)arg,sizeof(audio_24bit))) {
++            pr_err("%s: Could not copy lmode to user\n", __func__);
++            ret = -EFAULT;			
++        }
++        printk("%s: audio_24bit=%d\n",__func__,audio_24bit);
++        mutex_unlock(&audio_cal.cal_mutex[SET_FORMAT_TYPE]);
++        goto done;
++
+ 	default:
+ 		pr_err("%s: ioctl not found!\n", __func__);
+ 		ret = -EFAULT;
+@@ -509,9 +599,21 @@ unlock:
+ 	mutex_unlock(&audio_cal.cal_mutex[data->hdr.cal_type]);
+ done:
+ 	kfree(data);
++
++	/* ASUS_BSP */
++	kfree(codec_reg);
++	kfree(imp_val);
+ 	return ret;
+ }
+ 
++/* ASUS_BSP */
++int get_audiomode(void)
++{
++    printk("%s: Audio mode=%d\n",__func__, audio_mode);
++    return audio_mode;
++}
++EXPORT_SYMBOL(get_audiomode);
++
+ static long audio_cal_ioctl(struct file *f,
+ 		unsigned int cmd, unsigned long arg)
+ {
+@@ -532,6 +634,13 @@ static long audio_cal_ioctl(struct file *f,
+ 							204, compat_uptr_t)
+ #define AUDIO_POST_CALIBRATION32	_IOWR(CAL_IOCTL_MAGIC, \
+ 							205, compat_uptr_t)
++/* ASUS_BSP */
++#define AUDIO_SET_AUDIOWIZARD_FORCE_PRESET32	_IOWR(CAL_IOCTL_MAGIC, \
++							221, compat_uptr_t)
++#define AUDIO_GET_HS_IMP32			_IOWR(CAL_IOCTL_MAGIC, \
++							230, compat_uptr_t)
++#define AUDIO_SET_MODE32 _IOWR(CAL_IOCTL_MAGIC,225,compat_uptr_t)
++#define AUDIO_SET_FORMAT32 _IOWR(CAL_IOCTL_MAGIC,231,compat_uptr_t) //Rice
+ 
+ static long audio_cal_compat_ioctl(struct file *f,
+ 		unsigned int cmd, unsigned long arg)
+@@ -558,6 +667,19 @@ static long audio_cal_compat_ioctl(struct file *f,
+ 	case AUDIO_POST_CALIBRATION32:
+ 		cmd64 = AUDIO_POST_CALIBRATION;
+ 		break;
++	/* ASUS_BSP */
++	case AUDIO_SET_AUDIOWIZARD_FORCE_PRESET32:
++		cmd64 = AUDIO_SET_AUDIOWIZARD_FORCE_PRESET;
++		break;
++	case AUDIO_GET_HS_IMP32:
++		cmd64 = AUDIO_GET_HS_IMP;
++		break;
++	case AUDIO_SET_MODE32:
++		cmd64 = AUDIO_SET_MODE;
++		break;
++	case AUDIO_SET_FORMAT32:
++		cmd64 = AUDIO_SET_FORMAT;
++		break;
+ 	default:
+ 		pr_err("%s: ioctl not found!\n", __func__);
+ 		ret = -EFAULT;
+diff --git a/sound/soc/msm/qdsp6v2/msm-audio-effects-q6-v2.c b/sound/soc/msm/qdsp6v2/msm-audio-effects-q6-v2.c
+index 65fdec57..600f7e4e 100644
+--- a/sound/soc/msm/qdsp6v2/msm-audio-effects-q6-v2.c
++++ b/sound/soc/msm/qdsp6v2/msm-audio-effects-q6-v2.c
+@@ -16,6 +16,7 @@
+ #include <sound/q6asm-v2.h>
+ #include <sound/compress_params.h>
+ #include <sound/msm-audio-effects-q6-v2.h>
++#include <sound/msm-dts-eagle.h>
+ #include <sound/devdep_params.h>
+ 
+ #define MAX_ENABLE_CMD_SIZE 32
+@@ -51,6 +52,26 @@ bool msm_audio_effects_is_effmodule_supp_in_top(int effect_module,
+ 	case EQ_MODULE:
+ 		switch (topology) {
+ 		case ASM_STREAM_POSTPROC_TOPO_ID_SA_PLUS:
++		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_PLUS:
++		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_MASTER:
++			return true;
++		default:
++			return false;
++		}
++	case DTS_EAGLE_MODULE:
++		switch (topology) {
++		case ASM_STREAM_POSTPROC_TOPO_ID_DTS_HPX:
++		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_PLUS:
++		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_MASTER:
++			return true;
++		default:
++			return false;
++		}
++	case SOFT_VOLUME2_MODULE:
++	case DTS_EAGLE_MODULE_ENABLE:
++		switch (topology) {
++		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_PLUS:
++		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_MASTER:
+ 			return true;
+ 		default:
+ 			return false;
+@@ -259,7 +280,7 @@ int msm_audio_effects_virtualizer_handler(struct audio_client *ac,
+ 			break;
+ 		}
+ 	}
+-	if (params_length && (rc == 0))
++	if (params_length && !msm_dts_eagle_is_hpx_on() && (rc == 0))
+ 		q6asm_send_audio_effects_params(ac, params,
+ 						params_length);
+ 	else
+@@ -731,7 +752,7 @@ int msm_audio_effects_reverb_handler(struct audio_client *ac,
+ 			break;
+ 		}
+ 	}
+-	if (params_length && (rc == 0))
++	if (params_length && !msm_dts_eagle_is_hpx_on() && (rc == 0))
+ 		q6asm_send_audio_effects_params(ac, params,
+ 						params_length);
+ 	else
+@@ -868,7 +889,7 @@ int msm_audio_effects_bass_boost_handler(struct audio_client *ac,
+ 			break;
+ 		}
+ 	}
+-	if (params_length && (rc == 0))
++	if (params_length && !msm_dts_eagle_is_hpx_on() && (rc == 0))
+ 		q6asm_send_audio_effects_params(ac, params,
+ 						params_length);
+ 	else
+@@ -1210,7 +1231,7 @@ int msm_audio_effects_popless_eq_handler(struct audio_client *ac,
+ 			break;
+ 		}
+ 	}
+-	if (params_length && (rc == 0))
++	if (params_length && !msm_dts_eagle_is_hpx_on() && (rc == 0))
+ 		q6asm_send_audio_effects_params(ac, params,
+ 						params_length);
+ 	else
+diff --git a/sound/soc/msm/qdsp6v2/msm-compress-q6-v2.c b/sound/soc/msm/qdsp6v2/msm-compress-q6-v2.c
+index b341adda..e997d3d7 100644
+--- a/sound/soc/msm/qdsp6v2/msm-compress-q6-v2.c
++++ b/sound/soc/msm/qdsp6v2/msm-compress-q6-v2.c
+@@ -43,6 +43,8 @@
+ #include <sound/compress_offload.h>
+ #include <sound/compress_driver.h>
+ #include <sound/msm-audio-effects-q6-v2.h>
++#include <sound/msm-dts-eagle.h>
++
+ #include "msm-pcm-routing-v2.h"
+ 
+ #define DSP_PP_BUFFERING_IN_MSEC	25
+@@ -85,6 +87,15 @@ const DECLARE_TLV_DB_LINEAR(msm_compr_vol_gain, 0,
+ 
+ #define MAX_NUMBER_OF_STREAMS 2
+ 
++/*
++ * Max size for getting DTS EAGLE Param through kcontrol
++ * Safe for both 32 and 64 bit platforms
++ * 64 = size of kcontrol value array on 64 bit platform
++ * 4 = size of parameters Eagle expects before cast to 64 bits
++ * 40 = size of dts_eagle_param_desc + module_id cast to 64 bits
++ */
++#define DTS_EAGLE_MAX_PARAM_SIZE_FOR_ALSA ((64 * 4) - 40)
++
+ struct msm_compr_gapless_state {
+ 	bool set_next_stream_id;
+ 	int32_t stream_opened[MAX_NUMBER_OF_STREAMS];
+@@ -281,6 +292,11 @@ static int msm_compr_set_volume(struct snd_compr_stream *cstream,
+ 	if (rc < 0)
+ 		pr_err("%s: Send vol gain command failed rc=%d\n",
+ 		       __func__, rc);
++	else
++		if (msm_dts_eagle_set_stream_gain(prtd->audio_client,
++						volume_l, volume_r))
++			pr_debug("%s: DTS_EAGLE send stream gain failed\n",
++				__func__);
+ 
+ 	return rc;
+ }
+@@ -1066,6 +1082,26 @@ static int msm_compr_init_pp_params(struct snd_compr_stream *cstream,
+ 	};
+ 
+ 	switch (ac->topology) {
++	case ASM_STREAM_POSTPROC_TOPO_ID_HPX_PLUS: /* HPX + SA+ topology */
++
++		ret = q6asm_set_softvolume_v2(ac, &softvol,
++					      SOFT_VOLUME_INSTANCE_1);
++		if (ret < 0)
++			pr_err("%s: Send SoftVolume Param failed ret=%d\n",
++			__func__, ret);
++
++		ret = q6asm_set_softvolume_v2(ac, &softvol,
++					      SOFT_VOLUME_INSTANCE_2);
++		if (ret < 0)
++			pr_err("%s: Send SoftVolume2 Param failed ret=%d\n",
++			__func__, ret);
++		/*
++		 * HPX module init is trigerred from HAL using ioctl
++		 * DTS_EAGLE_MODULE_ENABLE when stream starts
++		 */
++		break;
++	case ASM_STREAM_POSTPROC_TOPO_ID_DTS_HPX: /* HPX topology */
++		break;
+ 	default:
+ 		ret = q6asm_set_softvolume_v2(ac, &softvol,
+ 					      SOFT_VOLUME_INSTANCE_1);
+@@ -2989,6 +3025,23 @@ static int msm_compr_audio_effects_config_put(struct snd_kcontrol *kcontrol,
+ 						    &(audio_effects->equalizer),
+ 						     values);
+ 		break;
++	case DTS_EAGLE_MODULE:
++		pr_debug("%s: DTS_EAGLE_MODULE\n", __func__);
++		if (!msm_audio_effects_is_effmodule_supp_in_top(effects_module,
++						prtd->audio_client->topology))
++			return 0;
++		msm_dts_eagle_handle_asm(NULL, (void *)values, true,
++					 false, prtd->audio_client, NULL);
++		break;
++	case DTS_EAGLE_MODULE_ENABLE:
++		pr_debug("%s: DTS_EAGLE_MODULE_ENABLE\n", __func__);
++		if (msm_audio_effects_is_effmodule_supp_in_top(effects_module,
++						prtd->audio_client->topology))
++			msm_dts_eagle_enable_asm(prtd->audio_client,
++					(bool)values[0],
++					AUDPROC_MODULE_ID_DTS_HPX_PREMIX);
++
++		break;
+ 	case SOFT_VOLUME_MODULE:
+ 		pr_debug("%s: SOFT_VOLUME_MODULE\n", __func__);
+ 		break;
+@@ -3017,6 +3070,7 @@ static int msm_compr_audio_effects_config_get(struct snd_kcontrol *kcontrol,
+ 	struct msm_compr_audio_effects *audio_effects = NULL;
+ 	struct snd_compr_stream *cstream = NULL;
+ 	struct msm_compr_audio *prtd = NULL;
++	long *values = &(ucontrol->value.integer.value[0]);
+ 
+ 	pr_debug("%s\n", __func__);
+ 	if (fe_id >= MSM_FRONTEND_DAI_MAX) {
+@@ -3036,6 +3090,28 @@ static int msm_compr_audio_effects_config_get(struct snd_kcontrol *kcontrol,
+ 		return -EINVAL;
+ 	}
+ 
++	switch (audio_effects->query.mod_id) {
++	case DTS_EAGLE_MODULE:
++		pr_debug("%s: DTS_EAGLE_MODULE handling queued get\n",
++			 __func__);
++		values[0] = (long)audio_effects->query.mod_id;
++		values[1] = (long)audio_effects->query.parm_id;
++		values[2] = (long)audio_effects->query.size;
++		values[3] = (long)audio_effects->query.offset;
++		values[4] = (long)audio_effects->query.device;
++		if (values[2] > DTS_EAGLE_MAX_PARAM_SIZE_FOR_ALSA) {
++			pr_err("%s: DTS_EAGLE_MODULE parameter's requested size (%li) too large (max size is %i)\n",
++				__func__, values[2],
++				DTS_EAGLE_MAX_PARAM_SIZE_FOR_ALSA);
++			return -EINVAL;
++		}
++		msm_dts_eagle_handle_asm(NULL, (void *)&values[1],
++					 true, true, prtd->audio_client, NULL);
++		break;
++	default:
++		pr_err("%s: Invalid effects config module\n", __func__);
++		return -EINVAL;
++	}
+ 	return 0;
+ }
+ 
+diff --git a/sound/soc/msm/qdsp6v2/msm-dts-eagle.c b/sound/soc/msm/qdsp6v2/msm-dts-eagle.c
+new file mode 100644
+index 00000000..ae0ae33b
+--- /dev/null
++++ b/sound/soc/msm/qdsp6v2/msm-dts-eagle.c
+@@ -0,0 +1,1640 @@
++/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++
++#include <linux/init.h>
++#include <linux/err.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/mutex.h>
++#include <linux/slab.h>
++#include <linux/msm_ion.h>
++#include <linux/mm.h>
++#include <linux/msm_audio_ion.h>
++#include <linux/vmalloc.h>
++#include <sound/core.h>
++#include <sound/soc.h>
++#include <sound/pcm.h>
++#include <sound/q6adm-v2.h>
++#include <sound/q6asm-v2.h>
++#include <sound/apr_audio-v2.h>
++#include <sound/q6audio-v2.h>
++#include <sound/audio_effects.h>
++#include <sound/hwdep.h>
++#include <sound/msm-dts-eagle.h>
++#include <sound/q6core.h>
++
++#include "msm-pcm-routing-v2.h"
++
++#define ION_MEM_SIZE  131072
++#define DEPC_MAX_SIZE 524288
++
++#define MPST				AUDPROC_MODULE_ID_DTS_HPX_POSTMIX
++#define MPRE				AUDPROC_MODULE_ID_DTS_HPX_PREMIX
++
++#define eagle_vol_dbg(fmt, ...) \
++	pr_debug("DTS_EAGLE_DRIVER_VOLUME: " fmt "\n", ##__VA_ARGS__)
++#define eagle_vol_err(fmt, ...) \
++	pr_err("DTS_EAGLE_DRIVER_VOLUME: " fmt "\n", ##__VA_ARGS__)
++#define eagle_drv_dbg(fmt, ...) \
++	pr_debug("DTS_EAGLE_DRIVER: " fmt "\n", ##__VA_ARGS__)
++#define eagle_drv_err(fmt, ...) \
++	pr_err("DTS_EAGLE_DRIVER: " fmt "\n", ##__VA_ARGS__)
++#define eagle_precache_dbg(fmt, ...) \
++	pr_debug("DTS_EAGLE_DRIVER_SENDCACHE_PRE: " fmt "\n", ##__VA_ARGS__)
++#define eagle_precache_err(fmt, ...) \
++	pr_err("DTS_EAGLE_DRIVER_SENDCACHE_PRE: " fmt "\n", ##__VA_ARGS__)
++#define eagle_postcache_dbg(fmt, ...) \
++	pr_debug("DTS_EAGLE_DRIVER_SENDCACHE_POST: " fmt "\n", ##__VA_ARGS__)
++#define eagle_postcache_err(fmt, ...) \
++	pr_err("DTS_EAGLE_DRIVER_SENDCACHE_POST: " fmt "\n", ##__VA_ARGS__)
++#define eagle_ioctl_dbg(fmt, ...) \
++	pr_debug("DTS_EAGLE_DRIVER_IOCTL: " fmt "\n", ##__VA_ARGS__)
++#define eagle_ioctl_err(fmt, ...) \
++	pr_err("DTS_EAGLE_DRIVER_IOCTL: " fmt "\n", ##__VA_ARGS__)
++#define eagle_asm_dbg(fmt, ...) \
++	pr_debug("DTS_EAGLE_DRIVER_ASM: " fmt "\n", ##__VA_ARGS__)
++#define eagle_asm_err(fmt, ...) \
++	pr_err("DTS_EAGLE_DRIVER_ASM: " fmt "\n", ##__VA_ARGS__)
++#define eagle_adm_dbg(fmt, ...) \
++	pr_debug("DTS_EAGLE_DRIVER_ADM: " fmt "\n", ##__VA_ARGS__)
++#define eagle_adm_err(fmt, ...) \
++	pr_err("DTS_EAGLE_DRIVER_ADM: " fmt "\n", ##__VA_ARGS__)
++#define eagle_enable_dbg(fmt, ...) \
++	pr_debug("DTS_EAGLE_ENABLE: " fmt "\n", ##__VA_ARGS__)
++#define eagle_enable_err(fmt, ...) \
++	pr_err("DTS_EAGLE_ENABLE: " fmt "\n", ##__VA_ARGS__)
++#define eagle_ioctl_info(fmt, ...) \
++	pr_err("DTS_EAGLE_IOCTL: " fmt "\n", ##__VA_ARGS__)
++
++enum {
++	AUDIO_DEVICE_OUT_EARPIECE = 0,
++	AUDIO_DEVICE_OUT_SPEAKER,
++	AUDIO_DEVICE_OUT_WIRED_HEADSET,
++	AUDIO_DEVICE_OUT_WIRED_HEADPHONE,
++	AUDIO_DEVICE_OUT_BLUETOOTH_SCO,
++	AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET,
++	AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT,
++	AUDIO_DEVICE_OUT_BLUETOOTH_A2DP,
++	AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES,
++	AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_SPEAKER,
++	AUDIO_DEVICE_OUT_AUX_DIGITAL,
++	AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET,
++	AUDIO_DEVICE_OUT_DGTL_DOCK_HEADSET,
++	AUDIO_DEVICE_OUT_USB_ACCESSORY,
++	AUDIO_DEVICE_OUT_USB_DEVICE,
++	AUDIO_DEVICE_OUT_REMOTE_SUBMIX,
++	AUDIO_DEVICE_OUT_ANC_HEADSET,
++	AUDIO_DEVICE_OUT_ANC_HEADPHONE,
++	AUDIO_DEVICE_OUT_PROXY,
++	AUDIO_DEVICE_OUT_FM,
++	AUDIO_DEVICE_OUT_FM_TX,
++
++	AUDIO_DEVICE_OUT_COUNT
++};
++
++#define AUDIO_DEVICE_COMBO 0x400000 /* bit 23 */
++
++enum { /* cache block */
++	CB_0 = 0,
++	CB_1,
++	CB_2,
++	CB_3,
++	CB_4,
++	CB_5,
++	CB_6,
++	CB_7,
++
++	CB_COUNT
++};
++
++enum { /* cache block description */
++	CBD_DEV_MASK = 0,
++	CBD_OFFSG,
++	CBD_CMD0,
++	CBD_SZ0,
++	CBD_OFFS1,
++	CBD_CMD1,
++	CBD_SZ1,
++	CBD_OFFS2,
++	CBD_CMD2,
++	CBD_SZ2,
++	CBD_OFFS3,
++	CBD_CMD3,
++	CBD_SZ3,
++
++	CBD_COUNT,
++};
++
++static s32 _fx_logN(s32 x)
++{
++	s32 t, y = 0xa65af;
++	if (x < 0x00008000) {
++		x <<= 16; y -= 0xb1721; }
++	if (x < 0x00800000) {
++		x <<= 8; y -= 0x58b91; }
++	if (x < 0x08000000) {
++		x <<= 4; y -= 0x2c5c8; }
++	if (x < 0x20000000) {
++		x <<= 2; y -= 0x162e4; }
++	if (x < 0x40000000) {
++		x <<= 1; y -= 0x0b172; }
++	t = x + (x >> 1);
++	if ((t & 0x80000000) == 0) {
++		x = t; y -= 0x067cd; }
++	t = x + (x >> 2);
++	if ((t & 0x80000000) == 0) {
++		x = t; y -= 0x03920; }
++	t = x + (x >> 3);
++	if ((t & 0x80000000) == 0) {
++		x = t; y -= 0x01e27; }
++	t = x + (x >> 4);
++	if ((t & 0x80000000) == 0) {
++		x = t; y -= 0x00f85; }
++	t = x + (x >> 5);
++	if ((t & 0x80000000) == 0) {
++		x = t; y -= 0x007e1; }
++	t = x + (x >> 6);
++	if ((t & 0x80000000) == 0) {
++		x = t; y -= 0x003f8; }
++	t = x + (x >> 7);
++	if ((t & 0x80000000) == 0) {
++		x = t; y -= 0x001fe; }
++	x = 0x80000000 - x;
++	y -= x >> 15;
++	return y;
++}
++
++static inline void *_getd(struct dts_eagle_param_desc *depd)
++{
++	return (void *)(((char *)depd) + sizeof(struct dts_eagle_param_desc));
++}
++
++static int _ref_cnt;
++/* dts eagle parameter cache */
++static char *_depc;
++static u32 _depc_size;
++static s32 _c_bl[CB_COUNT][CBD_COUNT];
++static u32 _device_primary;
++static u32 _device_all;
++/* ION states */
++static struct ion_client *_ion_client;
++static struct ion_handle *_ion_handle;
++static struct param_outband _po;
++static struct audio_client *_ac_NT;
++static struct ion_client *_ion_client_NT;
++static struct ion_handle *_ion_handle_NT;
++static struct param_outband _po_NT;
++
++#define SEC_BLOB_MAX_CNT 10
++#define SEC_BLOB_MAX_SIZE 0x4004 /*extra 4 for size*/
++static char *_sec_blob[SEC_BLOB_MAX_CNT];
++struct mutex _sec_lock;
++
++/* multi-copp support */
++static int _cidx[AFE_MAX_PORTS] = {-1};
++
++/* volume controls */
++#define VOL_CMD_CNT_MAX 10
++static u32 _vol_cmd_cnt;
++static s32 **_vol_cmds;
++struct vol_cmds_d {
++	s32 d[4];
++};
++static struct vol_cmds_d *_vol_cmds_d;
++static const s32 _log10_10_inv_x20 = 0x0008af84;
++
++/* hpx master control */
++static u32 _is_hpx_enabled;
++
++static void _volume_cmds_free(void)
++{
++	int i;
++	for (i = 0; i < _vol_cmd_cnt; i++)
++		kfree(_vol_cmds[i]);
++	_vol_cmd_cnt = 0;
++	kfree(_vol_cmds);
++	kfree(_vol_cmds_d);
++	_vol_cmds = NULL;
++	_vol_cmds_d = NULL;
++}
++
++static s32 _volume_cmds_alloc1(s32 size)
++{
++	_volume_cmds_free();
++	_vol_cmd_cnt = size;
++	_vol_cmds = kzalloc(_vol_cmd_cnt * sizeof(int *), GFP_KERNEL);
++	if (_vol_cmds) {
++		_vol_cmds_d = kzalloc(_vol_cmd_cnt * sizeof(struct vol_cmds_d),
++					GFP_KERNEL);
++	}
++	if (_vol_cmds_d)
++		return 0;
++	_volume_cmds_free();
++	return -ENOMEM;
++}
++
++/* assumes size is equal or less than 0xFFF */
++static s32 _volume_cmds_alloc2(s32 idx, s32 size)
++{
++	kfree(_vol_cmds[idx]);
++	_vol_cmds[idx] = kzalloc(size, GFP_KERNEL);
++	if (_vol_cmds[idx])
++		return 0;
++	_vol_cmds_d[idx].d[0] = 0;
++	return -ENOMEM;
++}
++
++static void _init_cb_descs(void)
++{
++	int i;
++	for (i = 0; i < CB_COUNT; i++) {
++		_c_bl[i][CBD_DEV_MASK] = 0;
++		_c_bl[i][CBD_OFFSG] = _c_bl[i][CBD_OFFS1] =
++		_c_bl[i][CBD_OFFS2] = _c_bl[i][CBD_OFFS3] =
++		0xFFFFFFFF;
++		_c_bl[i][CBD_CMD0] = _c_bl[i][CBD_SZ0] =
++		_c_bl[i][CBD_CMD1] = _c_bl[i][CBD_SZ1] =
++		_c_bl[i][CBD_CMD2] = _c_bl[i][CBD_SZ2] =
++		_c_bl[i][CBD_CMD3] = _c_bl[i][CBD_SZ3] = 0;
++	}
++}
++
++static u32 _get_dev_mask_for_pid(int pid)
++{
++	switch (pid) {
++	case SLIMBUS_0_RX:
++		return (1 << AUDIO_DEVICE_OUT_EARPIECE) |
++			(1 << AUDIO_DEVICE_OUT_SPEAKER) |
++			(1 << AUDIO_DEVICE_OUT_WIRED_HEADSET) |
++			(1 << AUDIO_DEVICE_OUT_WIRED_HEADPHONE) |
++			(1 << AUDIO_DEVICE_OUT_ANC_HEADSET) |
++			(1 << AUDIO_DEVICE_OUT_ANC_HEADPHONE);
++	case INT_BT_SCO_RX:
++		return (1 << AUDIO_DEVICE_OUT_BLUETOOTH_SCO) |
++			(1 << AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET) |
++			(1 << AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT);
++	case RT_PROXY_PORT_001_RX:
++		return (1 << AUDIO_DEVICE_OUT_BLUETOOTH_A2DP) |
++			(1 << AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES) |
++			(1 << AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_SPEAKER) |
++			(1 << AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET) |
++			(1 << AUDIO_DEVICE_OUT_DGTL_DOCK_HEADSET) |
++			(1 << AUDIO_DEVICE_OUT_USB_ACCESSORY) |
++			(1 << AUDIO_DEVICE_OUT_USB_DEVICE) |
++			(1 << AUDIO_DEVICE_OUT_PROXY);
++	case HDMI_RX:
++		return 1 << AUDIO_DEVICE_OUT_AUX_DIGITAL;
++	case INT_FM_RX:
++		return 1 << AUDIO_DEVICE_OUT_FM;
++	case INT_FM_TX:
++		return 1 << AUDIO_DEVICE_OUT_FM_TX;
++	default:
++		return 0;
++	}
++}
++
++static int _get_pid_from_dev(u32 device)
++{
++	if (device & (1 << AUDIO_DEVICE_OUT_EARPIECE) ||
++	    device & (1 << AUDIO_DEVICE_OUT_SPEAKER) ||
++	    device & (1 << AUDIO_DEVICE_OUT_WIRED_HEADSET) ||
++	    device & (1 << AUDIO_DEVICE_OUT_WIRED_HEADPHONE) ||
++	    device & (1 << AUDIO_DEVICE_OUT_ANC_HEADSET) ||
++	    device & (1 << AUDIO_DEVICE_OUT_ANC_HEADPHONE)) {
++		return SLIMBUS_0_RX;
++	} else if (device & (1 << AUDIO_DEVICE_OUT_BLUETOOTH_SCO) ||
++		   device & (1 << AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET) ||
++		   device & (1 << AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT)) {
++		return INT_BT_SCO_RX;
++	} else if (device & (1 << AUDIO_DEVICE_OUT_BLUETOOTH_A2DP) ||
++		   device & (1 << AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES) ||
++		   device & (1 << AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_SPEAKER) ||
++		   device & (1 << AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET) ||
++		   device & (1 << AUDIO_DEVICE_OUT_DGTL_DOCK_HEADSET) ||
++		   device & (1 << AUDIO_DEVICE_OUT_USB_ACCESSORY) ||
++		   device & (1 << AUDIO_DEVICE_OUT_USB_DEVICE) ||
++		   device & (1 << AUDIO_DEVICE_OUT_PROXY)) {
++		return RT_PROXY_PORT_001_RX;
++	} else if (device & (1 << AUDIO_DEVICE_OUT_AUX_DIGITAL)) {
++		return HDMI_RX;
++	} else if (device & (1 << AUDIO_DEVICE_OUT_FM)) {
++		return INT_FM_RX;
++	} else if (device & (1 << AUDIO_DEVICE_OUT_FM_TX)) {
++		return INT_FM_TX;
++	}
++	return 0;
++}
++
++static s32 _get_cb_for_dev(int device)
++{
++	s32 i;
++	if (device & AUDIO_DEVICE_COMBO) {
++		for (i = 0; i < CB_COUNT; i++) {
++			if ((_c_bl[i][CBD_DEV_MASK] & device) == device)
++				return i;
++		}
++	} else {
++		for (i = 0; i < CB_COUNT; i++) {
++			if ((_c_bl[i][CBD_DEV_MASK] & device) &&
++			    !(_c_bl[i][CBD_DEV_MASK] & AUDIO_DEVICE_COMBO))
++				return i;
++		}
++	}
++	eagle_drv_err("%s: device %i not found", __func__, device);
++	return -EINVAL;
++}
++
++static int _is_port_open_and_eagle(int pid)
++{
++	if (msm_routing_check_backend_enabled(pid))
++		return 1;
++	return 1;
++}
++
++static int _isNTDevice(u32 device)
++{
++	if (device &
++		((1 << AUDIO_DEVICE_OUT_BLUETOOTH_SCO) |
++		(1 << AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET) |
++		(1 << AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT) |
++		(1 << AUDIO_DEVICE_OUT_BLUETOOTH_A2DP) |
++		(1 << AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES) |
++		(1 << AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_SPEAKER) |
++		(1 << AUDIO_DEVICE_OUT_AUX_DIGITAL)))
++		return 1;
++	return 0;
++}
++
++static void _reg_ion_mem(void)
++{
++	int rc;
++	rc = msm_audio_ion_alloc("DTS_EAGLE", &_ion_client, &_ion_handle,
++			    ION_MEM_SIZE, &_po.paddr, &_po.size, &_po.kvaddr);
++	if (rc)
++		eagle_drv_err("%s: msm audio ion alloc failed with %i",
++				__func__, rc);
++}
++
++static void _unreg_ion_mem(void)
++{
++	int rc;
++	rc = msm_audio_ion_free(_ion_client, _ion_handle);
++	if (rc)
++		eagle_drv_err("%s: msm audio ion alloc failed with %i",
++				__func__, rc);
++}
++
++static void _reg_ion_mem_NT(void)
++{
++	int rc;
++	eagle_drv_dbg("%s: NT ion mem", __func__);
++	rc = msm_audio_ion_alloc("DTS_EAGLE", &_ion_client_NT,
++				 &_ion_handle_NT, ION_MEM_SIZE,
++				 &_po_NT.paddr, &_po_NT.size, &_po_NT.kvaddr);
++	if (rc) {
++		eagle_drv_err("%s: msm audio ion alloc failed",	__func__);
++		return;
++	}
++	rc = q6asm_memory_map(_ac_NT, _po_NT.paddr,
++			      IN, _po_NT.size, 1);
++	if (rc < 0) {
++		eagle_drv_err("%s: memory map failed", __func__);
++		msm_audio_ion_free(_ion_client_NT, _ion_handle_NT);
++		_ion_client_NT = NULL;
++		_ion_handle_NT = NULL;
++	}
++}
++
++static void _unreg_ion_mem_NT(void)
++{
++	int rc;
++	rc = q6asm_memory_unmap(_ac_NT,	_po_NT.paddr, IN);
++	if (rc < 0)
++		eagle_drv_err("%s: mem unmap failed", __func__);
++	rc = msm_audio_ion_free(_ion_client_NT, _ion_handle_NT);
++	if (rc < 0)
++		eagle_drv_err("%s: mem free failed", __func__);
++
++	_ion_client_NT = NULL;
++	_ion_handle_NT = NULL;
++}
++
++static struct audio_client *_getNTDeviceAC(void)
++{
++	return _ac_NT;
++}
++
++static void _set_audioclient(struct audio_client *ac)
++{
++	_ac_NT = ac;
++	_reg_ion_mem_NT();
++}
++
++static void _clear_audioclient(void)
++{
++	_unreg_ion_mem_NT();
++	_ac_NT = NULL;
++}
++
++
++static int _sendcache_pre(struct audio_client *ac)
++{
++	uint32_t offset, size;
++	int32_t cidx, cmd, err = 0;
++	cidx = _get_cb_for_dev(_device_primary);
++	if (cidx < 0) {
++		eagle_precache_err("%s: no cache for primary device %i found",
++			__func__, _device_primary);
++		return -EINVAL;
++	}
++	offset = _c_bl[cidx][CBD_OFFSG];
++	cmd = _c_bl[cidx][CBD_CMD0];
++	size = _c_bl[cidx][CBD_SZ0];
++	/* check for integer overflow */
++	if (offset > (UINT_MAX - size))
++		err = -EINVAL;
++	if ((_depc_size == 0) || !_depc || (size == 0) ||
++		cmd == 0 || ((offset + size) > _depc_size) || (err != 0)) {
++		eagle_precache_err("%s: primary device %i cache index %i general error - cache size = %u, cache ptr = %pK, offset = %u, size = %u, cmd = %i",
++			__func__, _device_primary, cidx, _depc_size, _depc,
++			offset, size, cmd);
++		return -EINVAL;
++	}
++
++	if ((offset < (UINT_MAX - 124)) && ((offset + 124) < _depc_size))
++		eagle_precache_dbg("%s: first 6 integers %i %i %i %i %i %i (30th %i)",
++			__func__, *((int *)&_depc[offset]),
++			*((int *)&_depc[offset+4]),
++			*((int *)&_depc[offset+8]),
++			*((int *)&_depc[offset+12]),
++			*((int *)&_depc[offset+16]),
++			*((int *)&_depc[offset+20]),
++			*((int *)&_depc[offset+120]));
++	eagle_precache_dbg("%s: sending full data block to port, with cache index = %d device mask 0x%X, param = 0x%X, offset = %u, and size = %u",
++		  __func__, cidx, _c_bl[cidx][CBD_DEV_MASK], cmd, offset, size);
++
++	if (q6asm_dts_eagle_set(ac, cmd, size, (void *)&_depc[offset],
++				NULL, MPRE))
++		eagle_precache_err("%s: q6asm_dts_eagle_set failed with id = %d and size = %u",
++			__func__, cmd, size);
++	else
++		eagle_precache_dbg("%s: q6asm_dts_eagle_set succeeded with id = %d and size = %u",
++			 __func__, cmd, size);
++	return 0;
++}
++
++static int _sendcache_post(int port_id, int copp_idx, int topology)
++{
++	int cidx = -1, cmd, mask, index, err = 0;
++	uint32_t offset, size;
++
++	if (port_id == -1) {
++		cidx = _get_cb_for_dev(_device_primary);
++		if (cidx < 0) {
++			eagle_postcache_err("%s: no cache for primary device %i found. Port id was 0x%X",
++				__func__, _device_primary, port_id);
++			return -EINVAL;
++		}
++		goto NT_MODE_GOTO;
++	}
++
++	index = adm_validate_and_get_port_index(port_id);
++	if (index < 0) {
++		eagle_postcache_err("%s: Invalid port idx %d port_id %#x",
++			__func__, index, port_id);
++		return -EINVAL;
++	}
++	eagle_postcache_dbg("%s: valid port idx %d for port_id %#x set to %i",
++		__func__, index, port_id, copp_idx);
++	_cidx[index] = copp_idx;
++
++	mask = _get_dev_mask_for_pid(port_id);
++	if (mask & _device_primary) {
++		cidx = _get_cb_for_dev(_device_primary);
++		if (cidx < 0) {
++			eagle_postcache_err("%s: no cache for primary device %i found. Port id was 0x%X",
++				__func__, _device_primary, port_id);
++			return -EINVAL;
++		}
++	} else if (mask & _device_all) {
++		cidx = _get_cb_for_dev(_device_all);
++		if (cidx < 0) {
++			eagle_postcache_err("%s: no cache for combo device %i found. Port id was 0x%X",
++				__func__, _device_all, port_id);
++			return -EINVAL;
++		}
++	} else {
++		eagle_postcache_err("%s: port id 0x%X not for primary or combo device %i",
++			__func__, port_id, _device_primary);
++		return -EINVAL;
++	}
++
++NT_MODE_GOTO:
++	offset = _c_bl[cidx][CBD_OFFSG] + _c_bl[cidx][CBD_OFFS2];
++	cmd = _c_bl[cidx][CBD_CMD2];
++	size = _c_bl[cidx][CBD_SZ2];
++
++	/* check for integer overflow */
++	if (offset > (UINT_MAX - size))
++		err = -EINVAL;
++	if ((_depc_size == 0) || !_depc || (err != 0) || (size == 0) ||
++		(cmd == 0) || (offset + size) > _depc_size) {
++		eagle_postcache_err("%s: primary device %i cache index %i port_id 0x%X general error - cache size = %u, cache ptr = %pK, offset = %u, size = %u, cmd = %i",
++			__func__, _device_primary, cidx, port_id,
++			_depc_size, _depc, offset, size, cmd);
++		return -EINVAL;
++	}
++
++	if ((offset < (UINT_MAX - 24)) && ((offset + 24) < _depc_size))
++		eagle_postcache_dbg("%s: first 6 integers %i %i %i %i %i %i",
++			__func__, *((int *)&_depc[offset]),
++			*((int *)&_depc[offset+4]),
++			*((int *)&_depc[offset+8]),
++			*((int *)&_depc[offset+12]),
++			*((int *)&_depc[offset+16]),
++			*((int *)&_depc[offset+20]));
++	eagle_postcache_dbg("%s: sending full data block to port, with cache index = %d device mask 0x%X, port_id = 0x%X, param = 0x%X, offset = %u, and size = %u",
++		__func__, cidx, _c_bl[cidx][CBD_DEV_MASK], port_id, cmd,
++		offset, size);
++
++	if (_ac_NT) {
++		eagle_postcache_dbg("%s: NT Route detected", __func__);
++		if (q6asm_dts_eagle_set(_getNTDeviceAC(), cmd, size,
++					(void *)&_depc[offset],
++					&_po_NT, MPST))
++			eagle_postcache_err("%s: q6asm_dts_eagle_set failed with id = 0x%X and size = %u",
++				__func__, cmd, size);
++	} else if (adm_dts_eagle_set(port_id, copp_idx, cmd,
++			      (void *)&_depc[offset], size) < 0)
++		eagle_postcache_err("%s: adm_dts_eagle_set failed with id = 0x%X and size = %u",
++			__func__, cmd, size);
++	else
++		eagle_postcache_dbg("%s: adm_dts_eagle_set succeeded with id = 0x%X and size = %u",
++			 __func__, cmd, size);
++	return 0;
++}
++
++static int _enable_post_get_control(struct snd_kcontrol *kcontrol,
++				    struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] = _is_hpx_enabled;
++	return 0;
++}
++
++static int _enable_post_put_control(struct snd_kcontrol *kcontrol,
++				    struct snd_ctl_elem_value *ucontrol)
++{
++	int idx = 0, be_index = 0, port_id, topology;
++	int flag = ucontrol->value.integer.value[0];
++	struct msm_pcm_routing_bdai_data msm_bedai;
++	eagle_drv_dbg("%s: flag %d", __func__, flag);
++
++	_is_hpx_enabled = flag ? true : false;
++	msm_pcm_routing_acquire_lock();
++	/* send cache postmix params when hpx is set On */
++	for (be_index = 0; be_index < MSM_BACKEND_DAI_MAX; be_index++) {
++		msm_pcm_routing_get_bedai_info(be_index, &msm_bedai);
++		port_id = msm_bedai.port_id;
++		if (!(((port_id == SLIMBUS_0_RX) ||
++		      (port_id == RT_PROXY_PORT_001_RX)) &&
++		      msm_bedai.active))
++			continue;
++		for (idx = 0; idx < MAX_COPPS_PER_PORT; idx++) {
++			topology = adm_get_topology_for_port_copp_idx(
++								port_id, idx);
++			if (topology ==
++				ADM_CMD_COPP_OPEN_TOPOLOGY_ID_DTS_HPX) {
++				msm_dts_eagle_enable_adm(port_id, idx,
++							 _is_hpx_enabled);
++			}
++		}
++	}
++	msm_pcm_routing_release_lock();
++	return 0;
++}
++
++static const struct snd_kcontrol_new _hpx_enabled_controls[] = {
++	SOC_SINGLE_EXT("Set HPX OnOff", SND_SOC_NOPM, 0, 1, 0,
++	_enable_post_get_control, _enable_post_put_control)
++};
++
++/**
++ * msm_dts_ion_memmap() - helper function to map ION memory
++ * @po_:	Out of band memory structure used as memory.
++ *
++ * Assign already allocated ION memory for mapping it to dsp.
++ *
++ * Return: No return value.
++ */
++void msm_dts_ion_memmap(struct param_outband *po_)
++{
++	po_->size = ION_MEM_SIZE;
++	po_->kvaddr = _po.kvaddr;
++	po_->paddr = _po.paddr;
++}
++
++/**
++ * msm_dts_eagle_enable_asm() - Enable/disable dts module
++ * @ac:	Enable/disable module in ASM session associated with this audio client.
++ * @enable:	Enable/disable the dts module.
++ * @module:	module id.
++ *
++ * Enable/disable specified dts module id in asm.
++ *
++ * Return: Return failure if any.
++ */
++int msm_dts_eagle_enable_asm(struct audio_client *ac, u32 enable, int module)
++{
++	int ret = 0;
++	eagle_enable_dbg("%s: enable = %i on module %i",
++		 __func__, enable, module);
++	_is_hpx_enabled = enable;
++	ret = q6asm_dts_eagle_set(ac, AUDPROC_PARAM_ID_ENABLE,
++				      sizeof(enable), &enable,
++				      NULL, module);
++	if (_is_hpx_enabled) {
++		if (module == MPRE)
++			_sendcache_pre(ac);
++		else if (module == MPST)
++			_sendcache_post(-1, 0, 0);
++	}
++	return ret;
++}
++
++/**
++ * msm_dts_eagle_enable_adm() - Enable/disable dts module in adm
++ * @port_id:	Send enable/disable param to this port id.
++ * @copp_idx:	Send enable/disable param to the relevant copp.
++ * @enable:	Enable/disable the dts module.
++ *
++ * Enable/disable dts module in adm.
++ *
++ * Return: Return failure if any.
++ */
++int msm_dts_eagle_enable_adm(int port_id, int copp_idx, u32 enable)
++{
++	int ret = 0;
++	eagle_enable_dbg("%s: enable = %i", __func__, enable);
++	_is_hpx_enabled = enable;
++	ret = adm_dts_eagle_set(port_id, copp_idx, AUDPROC_PARAM_ID_ENABLE,
++			     (char *)&enable, sizeof(enable));
++	if (_is_hpx_enabled)
++		_sendcache_post(port_id, copp_idx, MPST);
++	return ret;
++}
++
++/**
++ * msm_dts_eagle_add_controls() -  Add mixer control to Enable/Disable DTS HPX
++ * @platform:	Add mixer controls to this platform.
++ *
++ * Add mixer control to Enable/Disable DTS HPX module in ADM.
++ *
++ * Return: No return value.
++ */
++void msm_dts_eagle_add_controls(struct snd_soc_platform *platform)
++{
++	snd_soc_add_platform_controls(platform, _hpx_enabled_controls,
++				      ARRAY_SIZE(_hpx_enabled_controls));
++}
++
++/**
++ * msm_dts_eagle_set_stream_gain() -  Set stream gain to DTS Premix module
++ * @ac:	Set stream gain to ASM session associated with this audio client.
++ * @lgain:	Left gain value.
++ * @rgain:	Right gain value.
++ *
++ * Set stream gain to DTS Premix module in ASM.
++ *
++ * Return: failure or success.
++ */
++int msm_dts_eagle_set_stream_gain(struct audio_client *ac, int lgain, int rgain)
++{
++	u32 i, val;
++	s32 idx, err = 0;
++
++	eagle_vol_dbg("%s: - entry: vol_cmd_cnt = %u, lgain = %i, rgain = %i",
++		 __func__, _vol_cmd_cnt, lgain, rgain);
++
++	if (_depc_size == 0) {
++		eagle_vol_dbg("%s: driver cache not initialized", __func__);
++		return -EINVAL;
++	}
++
++	for (i = 0; i < _vol_cmd_cnt; i++) {
++		if (_vol_cmds_d[i].d[0] & 0x8000) {
++			idx = (sizeof(struct dts_eagle_param_desc)/sizeof(int))
++				+ (_vol_cmds_d[i].d[0] & 0x3FF);
++			val = _fx_logN(((s32)(lgain+rgain)) << 2);
++			val = ((long long)val * _log10_10_inv_x20) >> 16;
++			_vol_cmds[i][idx] = (s32)clamp((int)(((long long)val *
++						    _vol_cmds_d[i].d[1]) >> 16),
++						    _vol_cmds_d[i].d[2],
++						    _vol_cmds_d[i].d[3]);
++			 eagle_vol_dbg("%s: loop %u cmd desc found %i, idx = %i. volume info: lgain = %i, rgain = %i, volume = %i (scale %i, min %i, max %i)",
++				 __func__, i, _vol_cmds_d[i].d[0], idx, lgain,
++				 rgain, _vol_cmds[i][idx], _vol_cmds_d[i].d[1],
++				 _vol_cmds_d[i].d[2], _vol_cmds_d[i].d[3]);
++		}
++		idx = _get_cb_for_dev(_device_primary);
++		if (idx < 0) {
++			eagle_vol_err("%s: no cache for primary device %i found",
++				__func__, _device_primary);
++			return -EINVAL;
++		}
++		val = _c_bl[idx][CBD_OFFSG] + _vol_cmds[i][2];
++		/* check for integer overflow */
++		if (val > (UINT_MAX - _vol_cmds[i][1]))
++			err = -EINVAL;
++		if ((err != 0) || ((val + _vol_cmds[i][1]) > _depc_size)) {
++			eagle_vol_err("%s: volume size (%u) + offset (%i) out of bounds %i",
++				__func__, val, _vol_cmds[i][1], _depc_size);
++			return -EINVAL;
++		}
++		memcpy((void *)&_depc[val], &_vol_cmds[i][4], _vol_cmds[i][1]);
++		if (q6asm_dts_eagle_set(ac, _vol_cmds[i][0],
++			_vol_cmds[i][1], (void *)&_depc[val], NULL, MPRE))
++			eagle_vol_err("%s: loop %u - volume set failed with id 0x%X, size %i, offset %i, cmd_desc %i, scale %i, min %i, max %i, data(...) %i",
++				__func__, i, _vol_cmds[i][0], _vol_cmds[i][1],
++				_vol_cmds[i][2], _vol_cmds_d[i].d[0],
++				_vol_cmds_d[i].d[1], _vol_cmds_d[i].d[2],
++				_vol_cmds_d[i].d[3], _vol_cmds[i][4]);
++		else
++			eagle_vol_dbg("%s: loop %u - volume set succeeded with id 0x%X, size %i, offset %i, cmd_desc %i, scale %i, min %i, max %i, data(...) %i",
++				 __func__, i, _vol_cmds[i][0], _vol_cmds[i][1],
++				 _vol_cmds[i][2], _vol_cmds_d[i].d[0],
++				 _vol_cmds_d[i].d[1], _vol_cmds_d[i].d[2],
++				 _vol_cmds_d[i].d[3], _vol_cmds[i][4]);
++	}
++	return 0;
++}
++
++/**
++ * msm_dts_eagle_handle_asm() - Set or Get params from ASM
++ * @depd:	DTS Eagle Params structure.
++ * @buf:	Buffer to get queried param value.
++ * @for_pre:	For premix module or postmix module.
++ * @get:	Getting param from DSP or setting param.
++ * @ac:	Set/Get from ASM session associated with this audio client.
++ * @po:	Out of band memory to set or get postmix params.
++ *
++ * Set or Get params from modules in ASM session.
++ *
++ * Return: Return failure if any.
++ */
++int msm_dts_eagle_handle_asm(struct dts_eagle_param_desc *depd, char *buf,
++			     bool for_pre, bool get, struct audio_client *ac,
++			     struct param_outband *po)
++{
++	struct dts_eagle_param_desc depd_ = {0};
++	s32 ret = 0, isALSA = 0, err = 0, i, mod = for_pre ? MPRE : MPST;
++	u32 offset;
++
++	eagle_asm_dbg("%s: set/get asm", __func__);
++
++	/* special handling for ALSA route, to accommodate 64 bit platforms */
++	if (depd == NULL) {
++		long *arg_ = (long *)buf;
++		depd = &depd_;
++		depd->id = (u32)*arg_++;
++		depd->size = (u32)*arg_++;
++		depd->offset = (s32)*arg_++;
++		depd->device = (u32)*arg_++;
++		buf = (char *)arg_;
++		isALSA = 1;
++	}
++
++	if (depd->size & 1) {
++		eagle_asm_err("%s: parameter size %u is not a multiple of 2",
++			__func__, depd->size);
++		return -EINVAL;
++	}
++
++	if (get) {
++		void *buf_, *buf_m = NULL;
++		eagle_asm_dbg("%s: get requested", __func__);
++		if (depd->offset == -1) {
++			eagle_asm_dbg("%s: get from dsp requested", __func__);
++			if (depd->size > 0 && depd->size <= DEPC_MAX_SIZE) {
++				buf_ = buf_m = vzalloc(depd->size);
++			} else {
++				eagle_asm_err("%s: get size %u invalid",
++					      __func__, depd->size);
++				return -EINVAL;
++			}
++			if (!buf_m) {
++				eagle_asm_err("%s: out of memory", __func__);
++				return -ENOMEM;
++			} else if (q6asm_dts_eagle_get(ac, depd->id,
++						       depd->size, buf_m,
++						       po, mod) < 0) {
++				eagle_asm_err("%s: asm get failed", __func__);
++				ret = -EFAULT;
++				goto DTS_EAGLE_IOCTL_GET_PARAM_PRE_EXIT;
++			}
++			eagle_asm_dbg("%s: get result: param id 0x%x value %d size %u",
++				 __func__, depd->id, *(int *)buf_m, depd->size);
++		} else {
++			s32 tgt = _get_cb_for_dev(depd->device);
++			if (tgt < 0) {
++				eagle_asm_err("%s: no cache for device %u found",
++					__func__, depd->device);
++				return -EINVAL;
++			}
++			offset = _c_bl[tgt][CBD_OFFSG] + depd->offset;
++			/* check for integer overflow */
++			if (offset > (UINT_MAX - depd->size))
++				err = -EINVAL;
++			if ((err != 0) || (offset + depd->size) > _depc_size) {
++				eagle_asm_err("%s: invalid size %u and/or offset %u",
++					__func__, depd->size, offset);
++				return -EINVAL;
++			}
++			buf_ = (u32 *)&_depc[offset];
++		}
++		if (isALSA) {
++			if (depd->size == 2) {
++				*(long *)buf = (long)*(__u16 *)buf_;
++				eagle_asm_dbg("%s: asm out 16 bit value %li",
++						__func__, *(long *)buf);
++			} else {
++				s32 *pbuf = (s32 *)buf_;
++				long *bufl = (long *)buf;
++				for (i = 0; i < (depd->size >> 2); i++) {
++					*bufl++ = (long)*pbuf++;
++					eagle_asm_dbg("%s: asm out value %li",
++							 __func__, *(bufl-1));
++				}
++			}
++		} else {
++			memcpy(buf, buf_, depd->size);
++		}
++DTS_EAGLE_IOCTL_GET_PARAM_PRE_EXIT:
++		vfree(buf_m);
++		return (int)ret;
++	} else {
++		s32 tgt = _get_cb_for_dev(depd->device);
++		if (tgt < 0) {
++			eagle_asm_err("%s: no cache for device %u found",
++				__func__, depd->device);
++			return -EINVAL;
++		}
++		offset = _c_bl[tgt][CBD_OFFSG] + depd->offset;
++		/* check for integer overflow */
++		if (offset > (UINT_MAX - depd->size))
++			err = -EINVAL;
++		if ((err != 0) || ((offset + depd->size) > _depc_size)) {
++			eagle_asm_err("%s: invalid size %u and/or offset %u for parameter (cache is size %u)",
++				__func__, depd->size, offset, _depc_size);
++			return -EINVAL;
++		}
++		if (isALSA) {
++			if (depd->size == 2) {
++				*(__u16 *)&_depc[offset] = (__u16)*(long *)buf;
++				eagle_asm_dbg("%s: asm in 16 bit value %li",
++						__func__, *(long *)buf);
++			} else {
++				s32 *pbuf = (s32 *)&_depc[offset];
++				long *bufl = (long *)buf;
++				for (i = 0; i < (depd->size >> 2); i++) {
++					*pbuf++ = (s32)*bufl++;
++					eagle_asm_dbg("%s: asm in value %i",
++							__func__, *(pbuf-1));
++				}
++			}
++		} else {
++			memcpy(&_depc[offset], buf, depd->size);
++		}
++		eagle_asm_dbg("%s: param info: param = 0x%X, size = %u, offset = %i, device = %u, cache block %i, global offset = %u, first bytes as integer = %i",
++			__func__, depd->id, depd->size, depd->offset,
++			depd->device,
++			tgt, offset, *(int *)&_depc[offset]);
++		if (q6asm_dts_eagle_set(ac, depd->id, depd->size,
++					(void *)&_depc[offset], po, mod))
++			eagle_asm_err("%s: q6asm_dts_eagle_set failed with id = 0x%X, size = %u, offset = %d",
++				__func__, depd->id, depd->size, depd->offset);
++		else
++			eagle_asm_dbg("%s: q6asm_dts_eagle_set succeeded with id = 0x%X, size = %u, offset = %d",
++				 __func__, depd->id, depd->size, depd->offset);
++	}
++	return (int)ret;
++}
++
++/**
++ * msm_dts_eagle_handle_adm() - Set or Get params from ADM
++ * @depd:	DTS Eagle Params structure used to set or get.
++ * @buf:	Buffer to get queried param value in NT mode.
++ * @for_pre:	For premix module or postmix module.
++ * @get:	Getting param from DSP or setting param.
++ *
++ * Set or Get params from modules in ADM session.
++ *
++ * Return: Return failure if any.
++ */
++int msm_dts_eagle_handle_adm(struct dts_eagle_param_desc *depd, char *buf,
++			     bool for_pre, bool get)
++{
++	u32 pid = _get_pid_from_dev(depd->device), cidx;
++	s32 ret = 0;
++
++	eagle_adm_dbg("%s: set/get adm", __func__);
++
++	if (_isNTDevice(depd->device)) {
++		eagle_adm_dbg("%s: NT Route detected", __func__);
++		ret = msm_dts_eagle_handle_asm(depd, buf, for_pre, get,
++					       _getNTDeviceAC(), &_po_NT);
++		if (ret < 0)
++			eagle_adm_err("%s: NT Route set failed with id = 0x%X, size = %u, offset = %i, device = %u",
++				__func__, depd->id, depd->size, depd->offset,
++				depd->device);
++	} else if (get) {
++		cidx = adm_validate_and_get_port_index(pid);
++		eagle_adm_dbg("%s: get from qdsp requested (port id 0x%X)",
++			 __func__, pid);
++		if (adm_dts_eagle_get(pid, _cidx[cidx], depd->id,
++				      buf, depd->size) < 0) {
++			eagle_adm_err("%s: get from qdsp via adm with port id 0x%X failed",
++				 __func__, pid);
++			return -EFAULT;
++		}
++	} else if (_is_port_open_and_eagle(pid)) {
++		cidx = adm_validate_and_get_port_index(pid);
++		eagle_adm_dbg("%s: adm_dts_eagle_set called with id = 0x%X, size = %u, offset = %i, device = %u, port id = %u, copp index = %u",
++				__func__, depd->id, depd->size, depd->offset,
++				depd->device, pid, cidx);
++		ret = adm_dts_eagle_set(pid, _cidx[cidx], depd->id,
++					(void *)buf, depd->size);
++		if (ret < 0)
++			eagle_adm_err("%s: adm_dts_eagle_set failed", __func__);
++		else
++			eagle_adm_dbg("%s: adm_dts_eagle_set succeeded",
++				__func__);
++	} else {
++		ret = -EINVAL;
++		eagle_adm_dbg("%s: port id 0x%X not active or not Eagle",
++			 __func__, pid);
++	}
++	return (int)ret;
++}
++
++/**
++ * msm_dts_eagle_ioctl() - ioctl handler function
++ * @cmd:	cmd to handle.
++ * @arg:	argument to the cmd.
++ *
++ * Handle DTS Eagle ioctl cmds.
++ *
++ * Return: Return failure if any.
++ */
++int msm_dts_eagle_ioctl(unsigned int cmd, unsigned long arg)
++{
++	s32 ret = 0;
++	switch (cmd) {
++	case DTS_EAGLE_IOCTL_GET_CACHE_SIZE: {
++		eagle_ioctl_info("%s: called with control 0x%X (get param cache size)",
++			__func__, cmd);
++		if (copy_to_user((void *)arg, &_depc_size,
++				 sizeof(_depc_size))) {
++			eagle_ioctl_err("%s: error writing size", __func__);
++			return -EFAULT;
++		}
++		break;
++	}
++	case DTS_EAGLE_IOCTL_SET_CACHE_SIZE: {
++		u32 size = 0;
++		eagle_ioctl_info("%s: called with control 0x%X (allocate param cache)",
++			__func__, cmd);
++		if (copy_from_user((void *)&size, (void *)arg, sizeof(size))) {
++			eagle_ioctl_err("%s: error copying size (src:%pK, tgt:%pK, size:%zu)",
++				__func__, (void *)arg, &size, sizeof(size));
++			return -EFAULT;
++		} else if (size > DEPC_MAX_SIZE) {
++			eagle_ioctl_err("%s: cache size %u not allowed (min 0, max %u)",
++				__func__, size, DEPC_MAX_SIZE);
++			return -EINVAL;
++		}
++		if (_depc) {
++			eagle_ioctl_dbg("%s: previous param cache of size %u freed",
++				__func__, _depc_size);
++			_depc_size = 0;
++			vfree(_depc);
++			_depc = NULL;
++		}
++		if (size)
++			_depc = vzalloc(size);
++		else
++			eagle_ioctl_dbg("%s: %u bytes requested for param cache, nothing allocated",
++				__func__, size);
++		if (_depc) {
++			eagle_ioctl_dbg("%s: %u bytes allocated for param cache",
++				__func__, size);
++			_depc_size = size;
++		} else {
++			eagle_ioctl_err("%s: error allocating param cache (vzalloc failed on %u bytes)",
++				__func__, size);
++			_depc_size = 0;
++			return -ENOMEM;
++		}
++		break;
++	}
++	case DTS_EAGLE_IOCTL_GET_PARAM: {
++		struct dts_eagle_param_desc depd;
++		s32 for_pre = 0, get_from_core = 0, err = 0;
++		u32 offset;
++		void *buf, *buf_m = NULL;
++		eagle_ioctl_info("%s: control 0x%X (get param)",
++			__func__, cmd);
++		if (copy_from_user((void *)&depd, (void *)arg, sizeof(depd))) {
++			eagle_ioctl_err("%s: error copying dts_eagle_param_desc (src:%pK, tgt:%pK, size:%zu)",
++				__func__, (void *)arg, &depd, sizeof(depd));
++			return -EFAULT;
++		}
++		if (depd.device & DTS_EAGLE_FLAG_IOCTL_PRE) {
++			eagle_ioctl_dbg("%s: using for premix", __func__);
++			for_pre = 1;
++		}
++		if (depd.device & DTS_EAGLE_FLAG_IOCTL_GETFROMCORE) {
++			eagle_ioctl_dbg("%s: 'get from core' requested",
++				__func__);
++			get_from_core = 1;
++			depd.offset = -1;
++		}
++		depd.device &= DTS_EAGLE_FLAG_IOCTL_MASK;
++		if (depd.offset == -1) {
++			if (depd.size > 0 && depd.size <= DEPC_MAX_SIZE) {
++				buf = buf_m = vzalloc(depd.size);
++			} else {
++				eagle_ioctl_err("%s: get size %u invalid",
++						__func__, depd.size);
++				return -EINVAL;
++			}
++			if (!buf_m) {
++				eagle_ioctl_err("%s: out of memory", __func__);
++				return -ENOMEM;
++			}
++			if (get_from_core)
++				ret = core_dts_eagle_get(depd.id, depd.size,
++							 buf);
++			else
++				ret = msm_dts_eagle_handle_adm(&depd, buf,
++								for_pre, true);
++		} else {
++			s32 cb = _get_cb_for_dev(depd.device);
++			if (cb < 0) {
++				eagle_ioctl_err("%s: no cache for device %u found",
++					__func__, depd.device);
++				return -EINVAL;
++			}
++			offset = _c_bl[cb][CBD_OFFSG] + depd.offset;
++			/* check for integer overflow */
++			if (offset > (UINT_MAX - depd.size))
++				err = -EINVAL;
++			if ((err != 0) ||
++			    ((offset + depd.size) > _depc_size)) {
++				eagle_ioctl_err("%s: invalid size %u and/or offset %u",
++					__func__, depd.size, offset);
++				return -EINVAL;
++			}
++			buf = (void *)&_depc[offset];
++		}
++		if (ret < 0)
++			eagle_ioctl_err("%s: error %i getting data", __func__,
++				ret);
++		else if (copy_to_user((void *)(((char *)arg)+sizeof(depd)),
++						  buf, depd.size)) {
++			eagle_ioctl_err("%s: error copying get data", __func__);
++			ret = -EFAULT;
++		}
++		vfree(buf_m);
++		break;
++	}
++	case DTS_EAGLE_IOCTL_SET_PARAM: {
++		struct dts_eagle_param_desc depd;
++		s32 just_set_cache = 0, for_pre = 0, err = 0;
++		u32 offset;
++		s32 tgt;
++		eagle_ioctl_info("%s: control 0x%X (set param)",
++			__func__, cmd);
++		if (copy_from_user((void *)&depd, (void *)arg, sizeof(depd))) {
++			eagle_ioctl_err("%s: error copying dts_eagle_param_desc (src:%pK, tgt:%pK, size:%zu)",
++				__func__, (void *)arg, &depd, sizeof(depd));
++			return -EFAULT;
++		}
++		if (depd.device & DTS_EAGLE_FLAG_IOCTL_PRE) {
++			eagle_ioctl_dbg("%s: using for premix", __func__);
++			for_pre = 1;
++		}
++		if (depd.device & DTS_EAGLE_FLAG_IOCTL_JUSTSETCACHE) {
++			eagle_ioctl_dbg("%s: 'just set cache' requested",
++				__func__);
++			just_set_cache = 1;
++		}
++		depd.device &= DTS_EAGLE_FLAG_IOCTL_MASK;
++		tgt = _get_cb_for_dev(depd.device);
++		if (tgt < 0) {
++			eagle_ioctl_err("%s: no cache for device %u found",
++				__func__, depd.device);
++			return -EINVAL;
++		}
++		offset = _c_bl[tgt][CBD_OFFSG] + depd.offset;
++		/* check for integer overflow */
++		if (offset > (UINT_MAX - depd.size))
++			err = -EINVAL;
++		if ((err != 0) || ((offset + depd.size) > _depc_size)) {
++			eagle_ioctl_err("%s: invalid size %u and/or offset %u for parameter (target cache block %i with offset %i, global cache is size %u)",
++				__func__, depd.size, offset, tgt,
++				_c_bl[tgt][CBD_OFFSG], _depc_size);
++			return -EINVAL;
++		}
++		if (copy_from_user((void *)&_depc[offset],
++				   (void *)(((char *)arg)+sizeof(depd)),
++					depd.size)) {
++			eagle_ioctl_err("%s: error copying param to cache (src:%pK, tgt:%pK, size:%u)",
++				__func__, ((char *)arg)+sizeof(depd),
++				&_depc[offset], depd.size);
++			return -EFAULT;
++		}
++		eagle_ioctl_dbg("%s: param info: param = 0x%X, size = %u, offset = %i, device = %u, cache block %i, global offset = %u, first bytes as integer = %i",
++			__func__, depd.id, depd.size, depd.offset,
++			depd.device, tgt, offset, *(int *)&_depc[offset]);
++		if (!just_set_cache) {
++			ret = msm_dts_eagle_handle_adm(&depd, &_depc[offset],
++						       for_pre, false);
++		}
++		break;
++	}
++	case DTS_EAGLE_IOCTL_SET_CACHE_BLOCK: {
++		u32 b_[CBD_COUNT+1], *b = &b_[1], cb;
++		eagle_ioctl_info("%s: with control 0x%X (set param cache block)",
++			 __func__, cmd);
++		if (copy_from_user((void *)b_, (void *)arg, sizeof(b_))) {
++			eagle_ioctl_err("%s: error copying cache block data (src:%pK, tgt:%pK, size:%zu)",
++				__func__, (void *)arg, b_, sizeof(b_));
++			return -EFAULT;
++		}
++		cb = b_[0];
++		if (cb >= CB_COUNT) {
++			eagle_ioctl_err("%s: cache block %u out of range (max %u)",
++				__func__, cb, CB_COUNT-1);
++			return -EINVAL;
++		}
++		eagle_ioctl_dbg("%s: cache block %i set: devices 0x%X, global offset %i, offsets 1:%u 2:%u 3:%u, cmds/sizes 0:0x%X %u 1:0x%X %u 2:0x%X %u 3:0x%X %u",
++		__func__, cb, _c_bl[cb][CBD_DEV_MASK], _c_bl[cb][CBD_OFFSG],
++		_c_bl[cb][CBD_OFFS1], _c_bl[cb][CBD_OFFS2],
++		_c_bl[cb][CBD_OFFS3], _c_bl[cb][CBD_CMD0], _c_bl[cb][CBD_SZ0],
++		_c_bl[cb][CBD_CMD1], _c_bl[cb][CBD_SZ1], _c_bl[cb][CBD_CMD2],
++		_c_bl[cb][CBD_SZ2], _c_bl[cb][CBD_CMD3], _c_bl[cb][CBD_SZ3]);
++		if ((b[CBD_OFFSG]+b[CBD_OFFS1]+b[CBD_SZ1]) > _depc_size ||
++			(b[CBD_OFFSG]+b[CBD_OFFS2]+b[CBD_SZ2]) > _depc_size ||
++			(b[CBD_OFFSG]+b[CBD_OFFS3]+b[CBD_SZ3]) > _depc_size) {
++			eagle_ioctl_err("%s: cache block bounds out of range",
++					__func__);
++			return -EINVAL;
++		}
++		memcpy(_c_bl[cb], b, sizeof(_c_bl[cb]));
++		break;
++	}
++	case DTS_EAGLE_IOCTL_SET_ACTIVE_DEVICE: {
++		u32 data[2];
++		eagle_ioctl_dbg("%s: with control 0x%X (set active device)",
++			 __func__, cmd);
++		if (copy_from_user((void *)data, (void *)arg, sizeof(data))) {
++			eagle_ioctl_err("%s: error copying active device data (src:%pK, tgt:%pK, size:%zu)",
++				__func__, (void *)arg, data, sizeof(data));
++			return -EFAULT;
++		}
++		if (data[1] != 0) {
++			_device_primary = data[0];
++			eagle_ioctl_dbg("%s: primary device %i", __func__,
++				 data[0]);
++		} else {
++			_device_all = data[0];
++			eagle_ioctl_dbg("%s: all devices 0x%X", __func__,
++				 data[0]);
++		}
++		break;
++	}
++	case DTS_EAGLE_IOCTL_GET_LICENSE: {
++		u32 target = 0, size = 0;
++		s32 size_only;
++		eagle_ioctl_dbg("%s: with control 0x%X (get license)",
++			 __func__, cmd);
++		if (copy_from_user((void *)&target, (void *)arg,
++				   sizeof(target))) {
++			eagle_ioctl_err("%s: error reading license index. (src:%pK, tgt:%pK, size:%zu)",
++				__func__, (void *)arg, &target, sizeof(target));
++			return -EFAULT;
++		}
++		size_only = target & (1<<31) ? 1 : 0;
++		target &= 0x7FFFFFFF;
++		if (target >= SEC_BLOB_MAX_CNT) {
++			eagle_ioctl_err("%s: license index %u out of bounds (max index is %i)",
++				   __func__, target, SEC_BLOB_MAX_CNT);
++			return -EINVAL;
++		}
++		mutex_lock(&_sec_lock);
++		if (_sec_blob[target] == NULL) {
++			eagle_ioctl_err("%s: license index %u never initialized",
++				   __func__, target);
++			mutex_unlock(&_sec_lock);
++			return -EINVAL;
++		}
++		size = ((u32 *)_sec_blob[target])[0];
++		if ((size == 0) || (size > SEC_BLOB_MAX_SIZE)) {
++			eagle_ioctl_err("%s: license size %u for index %u invalid (min size is 1, max size is %u)",
++				   __func__, size, target, SEC_BLOB_MAX_SIZE);
++			mutex_unlock(&_sec_lock);
++			return -EINVAL;
++		}
++		if (size_only) {
++			eagle_ioctl_dbg("%s: reporting size of license data only",
++					__func__);
++			if (copy_to_user((void *)(((char *)arg)+sizeof(target)),
++				 (void *)&size, sizeof(size))) {
++				eagle_ioctl_err("%s: error copying license size",
++						__func__);
++				mutex_unlock(&_sec_lock);
++				return -EFAULT;
++			}
++		} else if (copy_to_user((void *)(((char *)arg)+sizeof(target)),
++			   (void *)&(((s32 *)_sec_blob[target])[1]), size)) {
++			eagle_ioctl_err("%s: error copying license data",
++				__func__);
++			mutex_unlock(&_sec_lock);
++			return -EFAULT;
++		} else
++			eagle_ioctl_info("%s: license file %u bytes long from license index %u returned to user",
++				  __func__, size, target);
++		mutex_unlock(&_sec_lock);
++		break;
++	}
++	case DTS_EAGLE_IOCTL_SET_LICENSE: {
++		u32 target[2] = {0, 0};
++		eagle_ioctl_dbg("%s: control 0x%X (set license)", __func__,
++				cmd);
++		if (copy_from_user((void *)target, (void *)arg,
++				   sizeof(target))) {
++			eagle_ioctl_err("%s: error reading license index (src:%pK, tgt:%pK, size:%zu)",
++				__func__, (void *)arg, target, sizeof(target));
++			return -EFAULT;
++		}
++		if (target[0] >= SEC_BLOB_MAX_CNT) {
++			eagle_ioctl_err("%s: license index %u out of bounds (max index is %u)",
++				   __func__, target[0], SEC_BLOB_MAX_CNT-1);
++			return -EINVAL;
++		}
++		mutex_lock(&_sec_lock);
++		if (target[1] == 0) {
++			eagle_ioctl_dbg("%s: request to free license index %u",
++				 __func__, target[0]);
++			kfree(_sec_blob[target[0]]);
++			_sec_blob[target[0]] = NULL;
++			mutex_unlock(&_sec_lock);
++			break;
++		}
++		if ((target[1] == 0) || (target[1] >= SEC_BLOB_MAX_SIZE)) {
++			eagle_ioctl_err("%s: license size %u for index %u invalid (min size is 1, max size is %u)",
++				__func__, target[1], target[0],
++				SEC_BLOB_MAX_SIZE);
++			mutex_unlock(&_sec_lock);
++			return -EINVAL;
++		}
++		if (_sec_blob[target[0]] != NULL) {
++			eagle_ioctl_dbg("%s: reallocate already allocated license index %i",
++				 __func__, target[0]);
++			kfree(_sec_blob[target[0]]);
++			_sec_blob[target[0]] = NULL;
++		}
++		eagle_ioctl_dbg("%s: allocating %u bytes for license index %u",
++				__func__, target[1], target[0]);
++		_sec_blob[target[0]] = kzalloc(target[1] + 4, GFP_KERNEL);
++		if (!_sec_blob[target[0]]) {
++			eagle_ioctl_err("%s: error allocating license index %u (kzalloc failed on %u bytes)",
++					__func__, target[0], target[1]);
++			mutex_unlock(&_sec_lock);
++			return -ENOMEM;
++		}
++		((u32 *)_sec_blob[target[0]])[0] = target[1];
++		if (copy_from_user(
++				(void *)&(((u32 *)_sec_blob[target[0]])[1]),
++				(void *)(((char *)arg)+sizeof(target)),
++				target[1])) {
++			eagle_ioctl_err("%s: error copying license to index %u, size %u (src:%pK, tgt:%pK, size:%u)",
++					__func__, target[0], target[1],
++					((char *)arg)+sizeof(target),
++					&(((u32 *)_sec_blob[target[0]])[1]),
++					target[1]);
++			mutex_unlock(&_sec_lock);
++			return -EFAULT;
++		} else
++			eagle_ioctl_info("%s: license file %u bytes long copied to index license index %u",
++				  __func__, target[1], target[0]);
++		mutex_unlock(&_sec_lock);
++		break;
++	}
++	case DTS_EAGLE_IOCTL_SEND_LICENSE: {
++		u32 target = 0;
++		eagle_ioctl_dbg("%s: control 0x%X (send license)", __func__,
++				cmd);
++		if (copy_from_user((void *)&target, (void *)arg,
++				   sizeof(target))) {
++			eagle_ioctl_err("%s: error reading license index (src:%pK, tgt:%pK, size:%zu)",
++				__func__, (void *)arg, &target, sizeof(target));
++			return -EFAULT;
++		}
++		if (target >= SEC_BLOB_MAX_CNT) {
++			eagle_ioctl_err("%s: license index %u out of bounds (max index is %i)",
++					__func__, target, SEC_BLOB_MAX_CNT-1);
++			return -EINVAL;
++		}
++		mutex_lock(&_sec_lock);
++		if (!_sec_blob[target] ||
++		    ((u32 *)_sec_blob[target])[0] == 0) {
++			eagle_ioctl_err("%s: license index %u is invalid",
++				__func__, target);
++			mutex_unlock(&_sec_lock);
++			return -EINVAL;
++		}
++		if (core_dts_eagle_set(((s32 *)_sec_blob[target])[0],
++				(char *)&((s32 *)_sec_blob[target])[1]) < 0)
++			eagle_ioctl_err("%s: core_dts_eagle_set failed with id = %u",
++				__func__, target);
++		else
++			eagle_ioctl_info("%s: core_dts_eagle_set succeeded with id = %u",
++				 __func__, target);
++		mutex_unlock(&_sec_lock);
++		break;
++	}
++	case DTS_EAGLE_IOCTL_SET_VOLUME_COMMANDS: {
++		s32 spec = 0;
++		eagle_ioctl_info("%s: control 0x%X (set volume commands)",
++				__func__, cmd);
++		if (copy_from_user((void *)&spec, (void *)arg,
++					sizeof(spec))) {
++			eagle_ioctl_err("%s: error reading volume command specifier (src:%pK, tgt:%pK, size:%zu)",
++				__func__, (void *)arg, &spec, sizeof(spec));
++			return -EFAULT;
++		}
++		if (spec & 0x80000000) {
++			u32 idx = (spec & 0x0000F000) >> 12;
++			s32 size = spec & 0x00000FFF;
++			eagle_ioctl_dbg("%s: setting volume command %i size: %i",
++				__func__, idx, size);
++			if (idx >= _vol_cmd_cnt) {
++				eagle_ioctl_err("%s: volume command index %u out of bounds (only %u allocated)",
++					__func__, idx, _vol_cmd_cnt);
++				return -EINVAL;
++			}
++			if (_volume_cmds_alloc2(idx, size) < 0) {
++				eagle_ioctl_err("%s: error allocating memory for volume controls",
++						__func__);
++				return -ENOMEM;
++			}
++			if (copy_from_user((void *)&_vol_cmds_d[idx],
++					(void *)(((char *)arg) + sizeof(int)),
++					sizeof(struct vol_cmds_d))) {
++				eagle_ioctl_err("%s: error reading volume command descriptor (src:%pK, tgt:%pK, size:%zu)",
++					__func__, ((char *)arg) + sizeof(int),
++					&_vol_cmds_d[idx],
++					sizeof(struct vol_cmds_d));
++				return -EFAULT;
++			}
++			eagle_ioctl_dbg("%s: setting volume command %i spec (size %zu): %i %i %i %i",
++				  __func__, idx, sizeof(struct vol_cmds_d),
++				  _vol_cmds_d[idx].d[0], _vol_cmds_d[idx].d[1],
++				  _vol_cmds_d[idx].d[2], _vol_cmds_d[idx].d[3]);
++			if (copy_from_user((void *)_vol_cmds[idx],
++					(void *)(((char *)arg) + (sizeof(int) +
++					sizeof(struct vol_cmds_d))), size)) {
++				eagle_ioctl_err("%s: error reading volume command string (src:%pK, tgt:%pK, size:%i)",
++					__func__, ((char *)arg) + (sizeof(int) +
++					sizeof(struct vol_cmds_d)),
++					_vol_cmds[idx], size);
++				return -EFAULT;
++			}
++		} else {
++			eagle_ioctl_dbg("%s: setting volume command size",
++					__func__);
++			if (spec < 0 || spec > VOL_CMD_CNT_MAX) {
++				eagle_ioctl_err("%s: volume command count %i out of bounds (min 0, max %i)",
++					__func__, spec, VOL_CMD_CNT_MAX);
++				return -EINVAL;
++			} else if (spec == 0) {
++				eagle_ioctl_dbg("%s: request to free volume commands",
++						__func__);
++				_volume_cmds_free();
++				break;
++			}
++			eagle_ioctl_dbg("%s: setting volume command size requested = %i",
++				  __func__, spec);
++			if (_volume_cmds_alloc1(spec) < 0) {
++				eagle_ioctl_err("%s: error allocating memory for volume controls",
++						__func__);
++				return -ENOMEM;
++			}
++		}
++		break;
++	}
++	default: {
++		eagle_ioctl_err("%s: control 0x%X (invalid control)",
++			 __func__, cmd);
++		ret = -EINVAL;
++	}
++	}
++	return (int)ret;
++}
++
++/**
++ * msm_dts_eagle_compat_ioctl() - To handle 32bit to 64bit ioctl compatibility
++ * @cmd:	cmd to handle.
++ * @arg:	argument to the cmd.
++ *
++ * Handle DTS Eagle ioctl cmds from 32bit userspace.
++ *
++ * Return: Return failure if any.
++ */
++#ifdef CONFIG_COMPAT
++int msm_dts_eagle_compat_ioctl(unsigned int cmd, unsigned long arg)
++{
++	switch (cmd) {
++	case DTS_EAGLE_IOCTL_GET_CACHE_SIZE32:
++		cmd = DTS_EAGLE_IOCTL_GET_CACHE_SIZE;
++		break;
++	case DTS_EAGLE_IOCTL_SET_CACHE_SIZE32:
++		cmd = DTS_EAGLE_IOCTL_SET_CACHE_SIZE;
++		break;
++	case DTS_EAGLE_IOCTL_GET_PARAM32:
++		cmd = DTS_EAGLE_IOCTL_GET_PARAM;
++		break;
++	case DTS_EAGLE_IOCTL_SET_PARAM32:
++		cmd = DTS_EAGLE_IOCTL_SET_PARAM;
++		break;
++	case DTS_EAGLE_IOCTL_SET_CACHE_BLOCK32:
++		cmd = DTS_EAGLE_IOCTL_SET_CACHE_BLOCK;
++		break;
++	case DTS_EAGLE_IOCTL_SET_ACTIVE_DEVICE32:
++		cmd = DTS_EAGLE_IOCTL_SET_ACTIVE_DEVICE;
++		break;
++	case DTS_EAGLE_IOCTL_GET_LICENSE32:
++		cmd = DTS_EAGLE_IOCTL_GET_LICENSE;
++		break;
++	case DTS_EAGLE_IOCTL_SET_LICENSE32:
++		cmd = DTS_EAGLE_IOCTL_SET_LICENSE;
++		break;
++	case DTS_EAGLE_IOCTL_SEND_LICENSE32:
++		cmd = DTS_EAGLE_IOCTL_SEND_LICENSE;
++		break;
++	case DTS_EAGLE_IOCTL_SET_VOLUME_COMMANDS32:
++		cmd = DTS_EAGLE_IOCTL_SET_VOLUME_COMMANDS;
++		break;
++	default:
++		break;
++	}
++	return msm_dts_eagle_ioctl(cmd, arg);
++}
++#endif
++/**
++ * msm_dts_eagle_init_pre() - Initialize DTS premix module
++ * @ac:	Initialize premix module in the ASM session.
++ *
++ * Initialize DTS premix module on provided ASM session
++ *
++ * Return: Return failure if any.
++ */
++int msm_dts_eagle_init_pre(struct audio_client *ac)
++{
++	return msm_dts_eagle_enable_asm(ac, _is_hpx_enabled,
++				 AUDPROC_MODULE_ID_DTS_HPX_PREMIX);
++}
++
++/**
++ * msm_dts_eagle_deinit_pre() - Deinitialize DTS premix module
++ * @ac:	Deinitialize premix module in the ASM session.
++ *
++ * Deinitialize DTS premix module on provided ASM session
++ *
++ * Return: Currently does nothing so 0.
++ */
++int msm_dts_eagle_deinit_pre(struct audio_client *ac)
++{
++	return 0;
++}
++
++/**
++ * msm_dts_eagle_init_post() - Initialize DTS postmix module
++ * @port_id:	Port id for the ADM session.
++ * @copp_idx:	Copp idx for the ADM session.
++ *
++ * Initialize DTS postmix module on ADM session
++ *
++ * Return: Return failure if any.
++ */
++int msm_dts_eagle_init_post(int port_id, int copp_idx)
++{
++	return msm_dts_eagle_enable_adm(port_id, copp_idx, _is_hpx_enabled);
++}
++
++/**
++ * msm_dts_eagle_deinit_post() - Deinitialize DTS postmix module
++ * @port_id:	Port id for the ADM session.
++ * @topology:	Topology in use.
++ *
++ * Deinitialize DTS postmix module on ADM session
++ *
++ * Return: Currently does nothing so 0.
++ */
++int msm_dts_eagle_deinit_post(int port_id, int topology)
++{
++	return 0;
++}
++
++/**
++ * msm_dts_eagle_init_master_module() - Initialize both DTS modules
++ * @ac:	Initialize modules in the ASM session.
++ *
++ * Initialize DTS modules on ASM session
++ *
++ * Return: Success.
++ */
++int msm_dts_eagle_init_master_module(struct audio_client *ac)
++{
++	_set_audioclient(ac);
++	msm_dts_eagle_enable_asm(ac, _is_hpx_enabled,
++				 AUDPROC_MODULE_ID_DTS_HPX_PREMIX);
++	msm_dts_eagle_enable_asm(ac, _is_hpx_enabled,
++				 AUDPROC_MODULE_ID_DTS_HPX_POSTMIX);
++	return 0;
++}
++
++/**
++ * msm_dts_eagle_deinit_master_module() - Deinitialize both DTS modules
++ * @ac:	Deinitialize modules in the ASM session.
++ *
++ * Deinitialize DTS modules on ASM session
++ *
++ * Return: Success.
++ */
++int msm_dts_eagle_deinit_master_module(struct audio_client *ac)
++{
++	msm_dts_eagle_deinit_pre(ac);
++	msm_dts_eagle_deinit_post(-1, 0);
++	_clear_audioclient();
++	return 0;
++}
++
++/**
++ * msm_dts_eagle_is_hpx_on() - Check if HPX effects are On
++ *
++ * Check if HPX effects are On
++ *
++ * Return: On/Off.
++ */
++int msm_dts_eagle_is_hpx_on(void)
++{
++	return _is_hpx_enabled;
++}
++
++/**
++ * msm_dts_eagle_pcm_new() - Create hwdep node
++ * @runtime:	snd_soc_pcm_runtime structure.
++ *
++ * Create hwdep node
++ *
++ * Return: Success.
++ */
++int msm_dts_eagle_pcm_new(struct snd_soc_pcm_runtime *runtime)
++{
++	if (!_ref_cnt++) {
++		_init_cb_descs();
++		_reg_ion_mem();
++	}
++	mutex_init(&_sec_lock);
++	return 0;
++}
++
++/**
++ * msm_dts_eagle_pcm_free() - remove hwdep node
++ * @runtime:	snd_soc_pcm_runtime structure.
++ *
++ * Remove hwdep node
++ *
++ * Return: void.
++ */
++void msm_dts_eagle_pcm_free(struct snd_pcm *pcm)
++{
++	if (!--_ref_cnt)
++		_unreg_ion_mem();
++	vfree(_depc);
++	mutex_destroy(&_sec_lock);
++}
++
++MODULE_DESCRIPTION("DTS EAGLE platform driver");
++MODULE_LICENSE("GPL v2");
+diff --git a/sound/soc/msm/qdsp6v2/msm-dts-srs-tm-config.c b/sound/soc/msm/qdsp6v2/msm-dts-srs-tm-config.c
+index 8fc49b29..4677c018 100644
+--- a/sound/soc/msm/qdsp6v2/msm-dts-srs-tm-config.c
++++ b/sound/soc/msm/qdsp6v2/msm-dts-srs-tm-config.c
+@@ -20,6 +20,7 @@
+ #include <sound/control.h>
+ #include <sound/q6adm-v2.h>
+ #include <sound/asound.h>
++#include <sound/msm-dts-eagle.h>
+ #include "msm-dts-srs-tm-config.h"
+ #include "msm-pcm-routing-v2.h"
+ 
+diff --git a/sound/soc/msm/qdsp6v2/msm-pcm-routing-devdep.c b/sound/soc/msm/qdsp6v2/msm-pcm-routing-devdep.c
+index da177c99..60eb6f80 100644
+--- a/sound/soc/msm/qdsp6v2/msm-pcm-routing-devdep.c
++++ b/sound/soc/msm/qdsp6v2/msm-pcm-routing-devdep.c
+@@ -14,6 +14,8 @@
+ #include <linux/module.h>
+ #include <sound/hwdep.h>
+ #include <sound/devdep_params.h>
++#include <sound/msm-dts-eagle.h>
++
+ #include "msm-pcm-routing-devdep.h"
+ #include "msm-ds2-dap-config.h"
+ 
+@@ -51,6 +53,23 @@ static int msm_pcm_routing_hwdep_ioctl(struct snd_hwdep *hw, struct file *file,
+ 	case SNDRV_DEVDEP_DAP_IOCTL_GET_VISUALIZER:
+ 		ret = msm_ds2_dap_ioctl(hw, file, cmd, argp);
+ 		break;
++	case DTS_EAGLE_IOCTL_GET_CACHE_SIZE:
++	case DTS_EAGLE_IOCTL_SET_CACHE_SIZE:
++	case DTS_EAGLE_IOCTL_GET_PARAM:
++	case DTS_EAGLE_IOCTL_SET_PARAM:
++	case DTS_EAGLE_IOCTL_SET_CACHE_BLOCK:
++	case DTS_EAGLE_IOCTL_SET_ACTIVE_DEVICE:
++	case DTS_EAGLE_IOCTL_GET_LICENSE:
++	case DTS_EAGLE_IOCTL_SET_LICENSE:
++	case DTS_EAGLE_IOCTL_SEND_LICENSE:
++	case DTS_EAGLE_IOCTL_SET_VOLUME_COMMANDS:
++		ret = msm_dts_eagle_ioctl(cmd, arg);
++		if (ret == -EPERM) {
++			pr_err("%s called with invalid control 0x%X\n",
++				__func__, cmd);
++			ret = -EINVAL;
++		}
++		break;
+ 	default:
+ 		pr_err("%s called with invalid control 0x%X\n", __func__, cmd);
+ 		ret = -EINVAL;
+@@ -62,6 +81,7 @@ static int msm_pcm_routing_hwdep_ioctl(struct snd_hwdep *hw, struct file *file,
+ void msm_pcm_routing_hwdep_free(struct snd_pcm *pcm)
+ {
+ 	pr_debug("%s\n", __func__);
++	msm_dts_eagle_pcm_free(pcm);
+ }
+ 
+ #ifdef CONFIG_COMPAT
+@@ -85,6 +105,23 @@ static int msm_pcm_routing_hwdep_compat_ioctl(struct snd_hwdep *hw,
+ 	case SNDRV_DEVDEP_DAP_IOCTL_GET_VISUALIZER32:
+ 		ret = msm_ds2_dap_compat_ioctl(hw, file, cmd, argp);
+ 		break;
++	case DTS_EAGLE_IOCTL_GET_CACHE_SIZE32:
++	case DTS_EAGLE_IOCTL_SET_CACHE_SIZE32:
++	case DTS_EAGLE_IOCTL_GET_PARAM32:
++	case DTS_EAGLE_IOCTL_SET_PARAM32:
++	case DTS_EAGLE_IOCTL_SET_CACHE_BLOCK32:
++	case DTS_EAGLE_IOCTL_SET_ACTIVE_DEVICE32:
++	case DTS_EAGLE_IOCTL_GET_LICENSE32:
++	case DTS_EAGLE_IOCTL_SET_LICENSE32:
++	case DTS_EAGLE_IOCTL_SEND_LICENSE32:
++	case DTS_EAGLE_IOCTL_SET_VOLUME_COMMANDS32:
++		ret = msm_dts_eagle_compat_ioctl(cmd, arg);
++		if (ret == -EPERM) {
++			pr_err("%s called with invalid control 0x%X\n",
++				__func__, cmd);
++			ret = -EINVAL;
++		}
++		break;
+ 	default:
+ 		pr_err("%s called with invalid control 0x%X\n", __func__, cmd);
+ 		ret = -EINVAL;
+@@ -130,6 +167,6 @@ int msm_pcm_routing_hwdep_new(struct snd_soc_pcm_runtime *runtime,
+ #ifdef CONFIG_COMPAT
+ 	hwdep->ops.ioctl_compat = msm_pcm_routing_hwdep_compat_ioctl;
+ #endif
+-	return rc;
++	return msm_dts_eagle_pcm_new(runtime);
+ }
+ #endif
+diff --git a/sound/soc/msm/qdsp6v2/msm-pcm-routing-v2.c b/sound/soc/msm/qdsp6v2/msm-pcm-routing-v2.c
+index ed7d4eda..c6fc2c48 100644
+--- a/sound/soc/msm/qdsp6v2/msm-pcm-routing-v2.c
++++ b/sound/soc/msm/qdsp6v2/msm-pcm-routing-v2.c
+@@ -33,6 +33,7 @@
+ #include <sound/pcm_params.h>
+ #include <sound/q6core.h>
+ #include <sound/audio_cal_utils.h>
++#include <sound/msm-dts-eagle.h>
+ #include <sound/audio_effects.h>
+ #include <sound/hwdep.h>
+ 
+@@ -190,6 +191,10 @@ static void msm_pcm_routing_cfg_pp(int port_id, int copp_idx, int topology,
+ 					__func__, topology, port_id, rc);
+ 		}
+ 		break;
++	case ADM_CMD_COPP_OPEN_TOPOLOGY_ID_DTS_HPX:
++		pr_debug("%s: DTS_EAGLE_COPP_TOPOLOGY_ID\n", __func__);
++		msm_dts_eagle_init_post(port_id, copp_idx);
++		break;
+ 	case ADM_CMD_COPP_OPEN_TOPOLOGY_ID_AUDIOSPHERE:
+ 		pr_debug("%s: TOPOLOGY_ID_AUDIOSPHERE\n", __func__);
+ 		msm_qti_pp_asphere_init(port_id, copp_idx);
+@@ -221,6 +226,10 @@ static void msm_pcm_routing_deinit_pp(int port_id, int topology)
+ 			msm_dolby_dap_deinit(port_id);
+ 		}
+ 		break;
++	case ADM_CMD_COPP_OPEN_TOPOLOGY_ID_DTS_HPX:
++		pr_debug("%s: DTS_EAGLE_COPP_TOPOLOGY_ID\n", __func__);
++		msm_dts_eagle_deinit_post(port_id, topology);
++		break;
+ 	case ADM_CMD_COPP_OPEN_TOPOLOGY_ID_AUDIOSPHERE:
+ 		pr_debug("%s: TOPOLOGY_ID_AUDIOSPHERE\n", __func__);
+ 		msm_qti_pp_asphere_deinit(port_id);
+@@ -13962,6 +13971,8 @@ static int msm_routing_probe(struct snd_soc_platform *platform)
+ 				device_pp_params_mixer_controls,
+ 				ARRAY_SIZE(device_pp_params_mixer_controls));
+ 
++	msm_dts_eagle_add_controls(platform);
++
+ 	snd_soc_add_platform_controls(platform, msm_source_tracking_controls,
+ 				      ARRAY_SIZE(msm_source_tracking_controls));
+ 
+diff --git a/sound/soc/msm/qdsp6v2/q6adm.c b/sound/soc/msm/qdsp6v2/q6adm.c
+index 2cbd170b..00863d58 100644
+--- a/sound/soc/msm/qdsp6v2/q6adm.c
++++ b/sound/soc/msm/qdsp6v2/q6adm.c
+@@ -23,6 +23,7 @@
+ #include <sound/q6afe-v2.h>
+ #include <sound/audio_cal_utils.h>
+ #include <sound/asound.h>
++#include <sound/msm-dts-eagle.h>
+ #include "msm-dts-srs-tm-config.h"
+ #include <sound/adsp_err.h>
+ 
+@@ -255,6 +256,222 @@ static int adm_get_next_available_copp(int port_idx)
+ 	return idx;
+ }
+ 
++int adm_dts_eagle_set(int port_id, int copp_idx, int param_id,
++		      void *data, uint32_t size)
++{
++	struct adm_cmd_set_pp_params_v5	admp;
++	int p_idx, ret = 0, *ob_params;
++
++	pr_debug("DTS_EAGLE_ADM: %s - port id %i, copp idx %i, param id 0x%X size %u\n",
++		__func__, port_id, copp_idx, param_id, size);
++
++	port_id = afe_convert_virtual_to_portid(port_id);
++	p_idx = adm_validate_and_get_port_index(port_id);
++	pr_debug("DTS_EAGLE_ADM: %s - after lookup, port id %i, port idx %i\n",
++		__func__, port_id, p_idx);
++
++	if (p_idx < 0) {
++		pr_err("DTS_EAGLE_ADM: %s: invalid port index 0x%x, port id 0x%x\n",
++			__func__, p_idx, port_id);
++		return -EINVAL;
++	}
++
++	if (copp_idx < 0 || copp_idx >= MAX_COPPS_PER_PORT) {
++		pr_err("DTS_EAGLE_ADM: %s: Invalid copp_idx: %d\n", __func__,
++			copp_idx);
++		return -EINVAL;
++	}
++
++	ob_params = (int *)this_adm.outband_memmap.kvaddr;
++	if (ob_params == NULL) {
++		pr_err("DTS_EAGLE_ADM: %s - NULL memmap. Non Eagle topology selected?\n",
++			__func__);
++		ret = -EINVAL;
++		goto fail_cmd;
++	}
++	/* check for integer overflow */
++	if (size > (UINT_MAX - APR_CMD_OB_HDR_SZ))
++		ret = -EINVAL;
++	if ((ret < 0) ||
++	    (size + APR_CMD_OB_HDR_SZ > this_adm.outband_memmap.size)) {
++		pr_err("DTS_EAGLE_ADM - %s: ion alloc of size %zu too small for size requested %u\n",
++			__func__, this_adm.outband_memmap.size,
++			size + APR_CMD_OB_HDR_SZ);
++		ret = -EINVAL;
++		goto fail_cmd;
++	}
++	*ob_params++ = AUDPROC_MODULE_ID_DTS_HPX_POSTMIX;
++	*ob_params++ = param_id;
++	*ob_params++ = size;
++	memcpy(ob_params, data, size);
++
++	admp.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
++		APR_HDR_LEN(APR_HDR_SIZE), APR_PKT_VER);
++	admp.hdr.pkt_size = sizeof(admp);
++	admp.hdr.src_svc = APR_SVC_ADM;
++	admp.hdr.src_domain = APR_DOMAIN_APPS;
++	admp.hdr.src_port = port_id;
++	admp.hdr.dest_svc = APR_SVC_ADM;
++	admp.hdr.dest_domain = APR_DOMAIN_ADSP;
++	admp.hdr.dest_port = atomic_read(&this_adm.copp.id[p_idx][copp_idx]);
++	admp.hdr.token = p_idx << 16 | copp_idx;
++	admp.hdr.opcode = ADM_CMD_SET_PP_PARAMS_V5;
++	admp.payload_addr_lsw = lower_32_bits(this_adm.outband_memmap.paddr);
++	admp.payload_addr_msw = msm_audio_populate_upper_32_bits(
++						this_adm.outband_memmap.paddr);
++	admp.mem_map_handle = atomic_read(&this_adm.mem_map_handles[
++					  ADM_DTS_EAGLE]);
++	admp.payload_size = size + sizeof(struct adm_param_data_v5);
++
++	pr_debug("DTS_EAGLE_ADM: %s - Command was sent now check Q6 - port id = %d, size %d, module id %x, param id %x.\n",
++			__func__, admp.hdr.dest_port,
++			admp.payload_size, AUDPROC_MODULE_ID_DTS_HPX_POSTMIX,
++			param_id);
++	atomic_set(&this_adm.copp.stat[p_idx][copp_idx], -1);
++	ret = apr_send_pkt(this_adm.apr, (uint32_t *)&admp);
++	if (ret < 0) {
++		pr_err("DTS_EAGLE_ADM: %s - ADM enable for port %d failed\n",
++			__func__, port_id);
++		ret = -EINVAL;
++		goto fail_cmd;
++	}
++	ret = wait_event_timeout(this_adm.copp.wait[p_idx][copp_idx],
++			atomic_read(&this_adm.copp.stat
++			[p_idx][copp_idx]) >= 0,
++			msecs_to_jiffies(TIMEOUT_MS));
++	if (!ret) {
++		pr_err("DTS_EAGLE_ADM: %s - set params timed out port = %d\n",
++			__func__, port_id);
++		ret = -EINVAL;
++	} else if (atomic_read(&this_adm.copp.stat
++				[p_idx][copp_idx]) > 0) {
++		pr_err("%s: DSP returned error[%s]\n",
++				__func__, adsp_err_get_err_str(
++				atomic_read(&this_adm.copp.stat
++				[p_idx][copp_idx])));
++		ret = adsp_err_get_lnx_err_code(
++				atomic_read(&this_adm.copp.stat
++				[p_idx][copp_idx]));
++	} else {
++		ret = 0;
++	}
++
++fail_cmd:
++	return ret;
++}
++
++int adm_dts_eagle_get(int port_id, int copp_idx, int param_id,
++		      void *data, uint32_t size)
++{
++	struct adm_cmd_get_pp_params_v5	admp;
++	int p_idx, ret = 0, *ob_params;
++	uint32_t orig_size = size;
++	pr_debug("DTS_EAGLE_ADM: %s - port id %i, copp idx %i, param id 0x%X\n",
++		 __func__, port_id, copp_idx, param_id);
++
++	port_id = afe_convert_virtual_to_portid(port_id);
++	p_idx = adm_validate_and_get_port_index(port_id);
++	if (p_idx < 0) {
++		pr_err("DTS_EAGLE_ADM: %s - invalid port index %i, port id %i, copp idx %i\n",
++				__func__, p_idx, port_id, copp_idx);
++		return -EINVAL;
++	}
++
++	if (copp_idx < 0 || copp_idx >= MAX_COPPS_PER_PORT) {
++		pr_err("DTS_EAGLE_ADM: %s: Invalid copp_idx: %d\n", __func__,
++			copp_idx);
++		return -EINVAL;
++	}
++
++	if ((size == 0) || !data) {
++		pr_err("DTS_EAGLE_ADM: %s - invalid size %u or pointer %pK.\n",
++			__func__, size, data);
++		return -EINVAL;
++	}
++
++	size = (size+3) & 0xFFFFFFFC;
++
++	ob_params = (int *)(this_adm.outband_memmap.kvaddr);
++	if (ob_params == NULL) {
++		pr_err("DTS_EAGLE_ADM: %s - NULL memmap. Non Eagle topology selected?",
++			__func__);
++		ret = -EINVAL;
++		goto fail_cmd;
++	}
++	/* check for integer overflow */
++	if (size > (UINT_MAX - APR_CMD_OB_HDR_SZ))
++		ret = -EINVAL;
++	if ((ret < 0) ||
++	    (size + APR_CMD_OB_HDR_SZ > this_adm.outband_memmap.size)) {
++		pr_err("DTS_EAGLE_ADM - %s: ion alloc of size %zu too small for size requested %u\n",
++			__func__, this_adm.outband_memmap.size,
++			size + APR_CMD_OB_HDR_SZ);
++		ret = -EINVAL;
++		goto fail_cmd;
++	}
++	*ob_params++ = AUDPROC_MODULE_ID_DTS_HPX_POSTMIX;
++	*ob_params++ = param_id;
++	*ob_params++ = size;
++
++	admp.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
++			     APR_HDR_LEN(APR_HDR_SIZE), APR_PKT_VER);
++	admp.hdr.pkt_size = sizeof(admp);
++	admp.hdr.src_svc = APR_SVC_ADM;
++	admp.hdr.src_domain = APR_DOMAIN_APPS;
++	admp.hdr.src_port = port_id;
++	admp.hdr.dest_svc = APR_SVC_ADM;
++	admp.hdr.dest_domain = APR_DOMAIN_ADSP;
++	admp.hdr.dest_port = atomic_read(&this_adm.copp.id[p_idx][copp_idx]);
++	admp.hdr.token = p_idx << 16 | copp_idx;
++	admp.hdr.opcode = ADM_CMD_GET_PP_PARAMS_V5;
++	admp.data_payload_addr_lsw =
++				lower_32_bits(this_adm.outband_memmap.paddr);
++	admp.data_payload_addr_msw =
++				msm_audio_populate_upper_32_bits(
++						this_adm.outband_memmap.paddr);
++	admp.mem_map_handle = atomic_read(&this_adm.mem_map_handles[
++					  ADM_DTS_EAGLE]);
++	admp.module_id = AUDPROC_MODULE_ID_DTS_HPX_POSTMIX;
++	admp.param_id = param_id;
++	admp.param_max_size = size + sizeof(struct adm_param_data_v5);
++	admp.reserved = 0;
++
++	atomic_set(&this_adm.copp.stat[p_idx][copp_idx], -1);
++
++	ret = apr_send_pkt(this_adm.apr, (uint32_t *)&admp);
++	if (ret < 0) {
++		pr_err("DTS_EAGLE_ADM: %s - Failed to get EAGLE Params on port %d\n",
++			__func__, port_id);
++		ret = -EINVAL;
++		goto fail_cmd;
++	}
++	ret = wait_event_timeout(this_adm.copp.wait[p_idx][copp_idx],
++			atomic_read(&this_adm.copp.stat
++			[p_idx][copp_idx]) >= 0,
++			msecs_to_jiffies(TIMEOUT_MS));
++	if (!ret) {
++		pr_err("DTS_EAGLE_ADM: %s - EAGLE get params timed out port = %d\n",
++			__func__, port_id);
++		ret = -EINVAL;
++		goto fail_cmd;
++	} else if (atomic_read(&this_adm.copp.stat
++				[p_idx][copp_idx]) > 0) {
++		pr_err("%s: DSP returned error[%s]\n",
++				__func__, adsp_err_get_err_str(
++				atomic_read(&this_adm.copp.stat
++				[p_idx][copp_idx])));
++		ret = adsp_err_get_lnx_err_code(
++				atomic_read(&this_adm.copp.stat
++					[p_idx][copp_idx]));
++		goto fail_cmd;
++	}
++
++	memcpy(data, ob_params, orig_size);
++	ret = 0;
++fail_cmd:
++	return ret;
++}
++
+ int srs_trumedia_open(int port_id, int copp_idx, __s32 srs_tech_id,
+ 		      void *srs_params)
+ {
+@@ -2424,6 +2641,13 @@ int adm_open(int port_id, int path, int rate, int channel_mode, int topology,
+ 		 __func__, port_id, path, rate, channel_mode, perf_mode,
+ 		 topology);
+ 
++	/* For DTS EAGLE only, force 24 bit */
++	if ((topology == ADM_CMD_COPP_OPEN_TOPOLOGY_ID_DTS_HPX) &&
++		(perf_mode == LEGACY_PCM_MODE)) {
++		bit_width = 24;
++		pr_debug("%s: Force open adm in 24-bit for DTS HPX topology 0x%x\n",
++			__func__, topology);
++	}
+ 	port_id = q6audio_convert_virtual_to_portid(port_id);
+ 	port_idx = adm_validate_and_get_port_index(port_id);
+ 	if (port_idx < 0) {
+@@ -2530,6 +2754,20 @@ int adm_open(int port_id, int path, int rate, int channel_mode, int topology,
+ 		(uint32_t)this_adm.outband_memmap.size);
+ 		}
+ 	}
++		if ((topology == ADM_CMD_COPP_OPEN_TOPOLOGY_ID_DTS_HPX) &&
++		    (perf_mode == LEGACY_PCM_MODE)) {
++			int res = 0;
++			atomic_set(&this_adm.mem_map_index, ADM_DTS_EAGLE);
++			msm_dts_ion_memmap(&this_adm.outband_memmap);
++			res = adm_memory_map_regions(
++				      &this_adm.outband_memmap.paddr,
++				      0,
++				      (uint32_t *)&this_adm.outband_memmap.size,
++				      1);
++			if (res < 0)
++				pr_err("%s: DTS_EAGLE mmap did not work!",
++					__func__);
++		}
+ 		open.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
+ 						   APR_HDR_LEN(APR_HDR_SIZE),
+ 						   APR_PKT_VER);
+@@ -2984,6 +3222,21 @@ int adm_close(int port_id, int perf_mode, int copp_idx)
+ 			}
+ 		}
+ 
++		if ((perf_mode == LEGACY_PCM_MODE) &&
++		    (this_adm.outband_memmap.paddr != 0) &&
++		    (atomic_read(
++			&this_adm.copp.topology[port_idx][copp_idx]) ==
++			ADM_CMD_COPP_OPEN_TOPOLOGY_ID_DTS_HPX)) {
++			atomic_set(&this_adm.mem_map_index, ADM_DTS_EAGLE);
++			ret = adm_memory_unmap_regions();
++			if (ret < 0) {
++				pr_err("%s: adm mem unmmap err %d",
++					__func__, ret);
++			} else {
++				atomic_set(&this_adm.mem_map_handles
++					   [ADM_DTS_EAGLE], 0);
++			}
++		}
+ 
+ 		if ((afe_get_port_type(port_id) == MSM_AFE_PORT_TYPE_TX) &&
+ 		    this_adm.sourceTrackingData.memmap.paddr) {
+@@ -3456,6 +3709,10 @@ static int adm_init_cal_data(void)
+ 		{NULL, NULL, NULL, NULL, NULL, NULL} },
+ 		{NULL, NULL, cal_utils_match_buf_num} },
+ 
++		{{DTS_EAGLE_CAL_TYPE,
++		{NULL, NULL, NULL, NULL, NULL, NULL} },
++		{NULL, NULL, cal_utils_match_buf_num} },
++
+ 		{{SRS_TRUMEDIA_CAL_TYPE,
+ 		{NULL, NULL, NULL, NULL, NULL, NULL} },
+ 		{NULL, NULL, cal_utils_match_buf_num} },
+diff --git a/sound/soc/msm/qdsp6v2/q6asm.c b/sound/soc/msm/qdsp6v2/q6asm.c
+index 22d5f5a6..16777cbe 100644
+--- a/sound/soc/msm/qdsp6v2/q6asm.c
++++ b/sound/soc/msm/qdsp6v2/q6asm.c
+@@ -38,6 +38,7 @@
+ #include <sound/q6asm-v2.h>
+ #include <sound/q6audio-v2.h>
+ #include <sound/audio_cal_utils.h>
++#include <sound/msm-dts-eagle.h>
+ #include <sound/adsp_err.h>
+ #include <sound/compress_params.h>
+ 
+@@ -2779,6 +2780,11 @@ static int __q6asm_open_write(struct audio_client *ac, uint32_t format,
+ 
+ 	open.postprocopo_id = q6asm_get_asm_topology_cal();
+ 
++	/* For DTS EAGLE only, force 24 bit */
++	if ((open.postprocopo_id == ASM_STREAM_POSTPROC_TOPO_ID_DTS_HPX) ||
++	     (open.postprocopo_id == ASM_STREAM_POSTPROC_TOPO_ID_HPX_PLUS))
++		open.bits_per_sample = 24;
++
+ 	pr_debug("%s: perf_mode %d asm_topology 0x%x bps %d\n", __func__,
+ 		 ac->perf_mode, open.postprocopo_id, open.bits_per_sample);
+ 
+@@ -2996,6 +3002,10 @@ static int __q6asm_open_read_write(struct audio_client *ac, uint32_t rd_format,
+ 	ac->topology = open.postprocopo_id;
+ 	ac->app_type = q6asm_get_asm_app_type_cal();
+ 
++	/* For DTS EAGLE only, force 24 bit */
++	if ((open.postprocopo_id == ASM_STREAM_POSTPROC_TOPO_ID_DTS_HPX) ||
++	     (open.postprocopo_id == ASM_STREAM_POSTPROC_TOPO_ID_HPX_MASTER))
++		open.bits_per_sample = 24;
+ 
+ 	switch (wr_format) {
+ 	case FORMAT_LINEAR_PCM:
+@@ -6705,6 +6715,233 @@ fail_cmd:
+ 	return rc;
+ }
+ 
++int q6asm_dts_eagle_set(struct audio_client *ac, int param_id, uint32_t size,
++			void *data, struct param_outband *po, int m_id)
++{
++	int rc = 0, *ob_params = NULL;
++	uint32_t sz = sizeof(struct asm_dts_eagle_param) + (po ? 0 : size);
++	struct asm_dts_eagle_param *ad;
++
++	if (!ac || ac->apr == NULL || (size == 0) || !data) {
++		pr_err("DTS_EAGLE_ASM - %s: APR handle NULL, invalid size %u or pointer %pK.\n",
++			__func__, size, data);
++		return -EINVAL;
++	}
++
++	ad = kzalloc(sz, GFP_KERNEL);
++	if (!ad) {
++		pr_err("DTS_EAGLE_ASM - %s: error allocating mem of size %u\n",
++			__func__, sz);
++		return -ENOMEM;
++	}
++	pr_debug("DTS_EAGLE_ASM - %s: ac %pK param_id 0x%x size %u data %pK m_id 0x%x\n",
++		__func__, ac, param_id, size, data, m_id);
++	q6asm_add_hdr_async(ac, &ad->hdr, sz, 1);
++	ad->hdr.opcode = ASM_STREAM_CMD_SET_PP_PARAMS_V2;
++	ad->param.data_payload_addr_lsw = 0;
++	ad->param.data_payload_addr_msw = 0;
++
++	ad->param.mem_map_handle = 0;
++	ad->param.data_payload_size = size +
++					sizeof(struct asm_stream_param_data_v2);
++	ad->data.module_id = m_id;
++	ad->data.param_id = param_id;
++	ad->data.param_size = size;
++	ad->data.reserved = 0;
++	atomic_set(&ac->cmd_state, -1);
++
++	if (po) {
++		struct list_head *ptr, *next;
++		struct asm_buffer_node *node;
++		pr_debug("DTS_EAGLE_ASM - %s: using out of band memory (virtual %pK, physical %pK)\n",
++			__func__, po->kvaddr, &po->paddr);
++		ad->param.data_payload_addr_lsw = lower_32_bits(po->paddr);
++		ad->param.data_payload_addr_msw =
++				msm_audio_populate_upper_32_bits(po->paddr);
++		list_for_each_safe(ptr, next, &ac->port[IN].mem_map_handle) {
++			node = list_entry(ptr, struct asm_buffer_node, list);
++			if (node->buf_phys_addr == po->paddr) {
++				ad->param.mem_map_handle = node->mmap_hdl;
++				break;
++			}
++		}
++		if (ad->param.mem_map_handle == 0) {
++			pr_err("DTS_EAGLE_ASM - %s: mem map handle not found\n",
++				__func__);
++			rc = -EINVAL;
++			goto fail_cmd;
++		}
++		/* check for integer overflow */
++		if (size > (UINT_MAX - APR_CMD_OB_HDR_SZ))
++			rc = -EINVAL;
++		if ((rc < 0) || (size + APR_CMD_OB_HDR_SZ > po->size)) {
++			pr_err("DTS_EAGLE_ASM - %s: ion alloc of size %zu too small for size requested %u\n",
++				__func__, po->size, size + APR_CMD_OB_HDR_SZ);
++			rc = -EINVAL;
++			goto fail_cmd;
++		}
++		ob_params = (int *)po->kvaddr;
++		*ob_params++ = m_id;
++		*ob_params++ = param_id;
++		*ob_params++ = size;
++		memcpy(ob_params, data, size);
++	} else {
++		pr_debug("DTS_EAGLE_ASM - %s: using in band\n", __func__);
++		memcpy(((char *)ad) + sizeof(struct asm_dts_eagle_param),
++			data, size);
++	}
++	rc = apr_send_pkt(ac->apr, (uint32_t *)ad);
++	if (rc < 0) {
++		pr_err("DTS_EAGLE_ASM - %s: set-params send failed paramid[0x%x]\n",
++			__func__, ad->data.param_id);
++		rc = -EINVAL;
++		goto fail_cmd;
++	}
++
++	rc = wait_event_timeout(ac->cmd_wait,
++			(atomic_read(&ac->cmd_state) >= 0), 1*HZ);
++	if (!rc) {
++		pr_err("DTS_EAGLE_ASM - %s: timeout, set-params paramid[0x%x]\n",
++			__func__, ad->data.param_id);
++		rc = -ETIMEDOUT;
++		goto fail_cmd;
++	}
++
++	if (atomic_read(&ac->cmd_state) > 0) {
++		pr_err("%s: DSP returned error[%s]\n",
++				__func__, adsp_err_get_err_str(
++				atomic_read(&ac->cmd_state)));
++		rc = adsp_err_get_lnx_err_code(
++				atomic_read(&ac->cmd_state));
++		goto fail_cmd;
++	}
++	rc = 0;
++fail_cmd:
++	kfree(ad);
++	return rc;
++}
++
++int q6asm_dts_eagle_get(struct audio_client *ac, int param_id, uint32_t size,
++			void *data, struct param_outband *po, int m_id)
++{
++	struct asm_dts_eagle_param_get *ad;
++	int rc = 0, *ob_params = NULL;
++	uint32_t sz = sizeof(struct asm_dts_eagle_param) + APR_CMD_GET_HDR_SZ +
++		 (po ? 0 : size);
++
++	if (!ac || ac->apr == NULL || (size == 0) || !data) {
++		pr_err("DTS_EAGLE_ASM - %s: APR handle NULL, invalid size %u or pointer %pK\n",
++			__func__, size, data);
++		return -EINVAL;
++	}
++	ad = kzalloc(sz, GFP_KERNEL);
++	if (!ad) {
++		pr_err("DTS_EAGLE_ASM - %s: error allocating memory of size %u\n",
++			__func__, sz);
++		return -ENOMEM;
++	}
++	pr_debug("DTS_EAGLE_ASM - %s: ac %pK param_id 0x%x size %u data %pK m_id 0x%x\n",
++		__func__, ac, param_id, size, data, m_id);
++	q6asm_add_hdr(ac, &ad->hdr, sz, TRUE);
++	ad->hdr.opcode = ASM_STREAM_CMD_GET_PP_PARAMS_V2;
++	ad->param.data_payload_addr_lsw = 0;
++	ad->param.data_payload_addr_msw = 0;
++	ad->param.mem_map_handle = 0;
++	ad->param.module_id = m_id;
++	ad->param.param_id = param_id;
++	ad->param.param_max_size = size + APR_CMD_GET_HDR_SZ;
++	ad->param.reserved = 0;
++	atomic_set(&ac->cmd_state, -1);
++
++	generic_get_data = kzalloc(size + sizeof(struct generic_get_data_),
++				   GFP_KERNEL);
++	if (!generic_get_data) {
++		pr_err("DTS_EAGLE_ASM - %s: error allocating mem of size %u\n",
++			__func__, size);
++		rc = -ENOMEM;
++		goto fail_cmd;
++	}
++
++	if (po) {
++		struct list_head *ptr, *next;
++		struct asm_buffer_node *node;
++		pr_debug("DTS_EAGLE_ASM - %s: using out of band memory (virtual %pK, physical %pK)\n",
++			 __func__, po->kvaddr, &po->paddr);
++		ad->param.data_payload_addr_lsw = lower_32_bits(po->paddr);
++		ad->param.data_payload_addr_msw =
++				msm_audio_populate_upper_32_bits(po->paddr);
++		list_for_each_safe(ptr, next, &ac->port[IN].mem_map_handle) {
++			node = list_entry(ptr, struct asm_buffer_node, list);
++			if (node->buf_phys_addr == po->paddr) {
++				ad->param.mem_map_handle = node->mmap_hdl;
++				break;
++			}
++		}
++		if (ad->param.mem_map_handle == 0) {
++			pr_err("DTS_EAGLE_ASM - %s: mem map handle not found\n",
++				__func__);
++			rc = -EINVAL;
++			goto fail_cmd;
++		}
++		/* check for integer overflow */
++		if (size > (UINT_MAX - APR_CMD_OB_HDR_SZ))
++			rc = -EINVAL;
++		if ((rc < 0) || (size + APR_CMD_OB_HDR_SZ > po->size)) {
++			pr_err("DTS_EAGLE_ASM - %s: ion alloc of size %zu too small for size requested %u\n",
++				__func__, po->size, size + APR_CMD_OB_HDR_SZ);
++			rc = -EINVAL;
++			goto fail_cmd;
++		}
++		ob_params = (int *)po->kvaddr;
++		*ob_params++ = m_id;
++		*ob_params++ = param_id;
++		*ob_params++ = size;
++		generic_get_data->is_inband = 0;
++	} else {
++		pr_debug("DTS_EAGLE_ASM - %s: using in band\n", __func__);
++		generic_get_data->is_inband = 1;
++	}
++
++	rc = apr_send_pkt(ac->apr, (uint32_t *)ad);
++	if (rc < 0) {
++		pr_err("DTS_EAGLE_ASM - %s: Commmand 0x%x failed\n", __func__,
++			ad->hdr.opcode);
++		goto fail_cmd;
++	}
++
++	rc = wait_event_timeout(ac->cmd_wait,
++			(atomic_read(&ac->cmd_state) >= 0), 1*HZ);
++	if (!rc) {
++		pr_err("DTS_EAGLE_ASM - %s: timeout in get\n",
++			__func__);
++		rc = -ETIMEDOUT;
++		goto fail_cmd;
++	}
++
++	if (atomic_read(&ac->cmd_state) > 0) {
++		pr_err("%s: DSP returned error[%s]\n",
++				__func__, adsp_err_get_err_str(
++				atomic_read(&ac->cmd_state)));
++		rc = adsp_err_get_lnx_err_code(
++				atomic_read(&ac->cmd_state));
++		goto fail_cmd;
++	}
++
++	if (generic_get_data->valid) {
++		rc = 0;
++		memcpy(data, po ? ob_params : generic_get_data->ints, size);
++	} else {
++		rc = -EINVAL;
++		pr_err("DTS_EAGLE_ASM - %s: EAGLE get params problem getting data - check callback error value\n",
++			__func__);
++	}
++fail_cmd:
++	kfree(ad);
++	kfree(generic_get_data);
++	generic_get_data = NULL;
++	return rc;
++}
++
+ static int __q6asm_set_volume(struct audio_client *ac, int volume, int instance)
+ {
+ 	struct asm_volume_ctrl_master_gain vol;
+diff --git a/sound/soc/msm/qdsp6v2/q6core.c b/sound/soc/msm/qdsp6v2/q6core.c
+index 09a6f0e1..b11b0b2d 100644
+--- a/sound/soc/msm/qdsp6v2/q6core.c
++++ b/sound/soc/msm/qdsp6v2/q6core.c
+@@ -257,7 +257,7 @@ static int32_t aprv2_core_fn_q(struct apr_client_data *data, void *priv)
+ 			generic_get_data->valid = 1;
+ 			generic_get_data->size_in_ints =
+ 				data->payload_size/sizeof(int);
+-			pr_debug("callback size = %i\n",
++			pr_debug("DTS_EAGLE_CORE callback size = %i\n",
+ 				 data->payload_size);
+ 			memcpy(generic_get_data->ints, data->payload,
+ 				data->payload_size);
+@@ -591,6 +591,115 @@ fail_cmd:
+ 	return ret;
+ }
+ 
++int core_dts_eagle_set(int size, char *data)
++{
++	struct adsp_dts_eagle *payload = NULL;
++	int rc = 0, size_aligned4byte;
++
++	pr_debug("DTS_EAGLE_CORE - %s\n", __func__);
++	if (size <= 0 || !data) {
++		pr_err("DTS_EAGLE_CORE - %s: invalid size %i or pointer %pK.\n",
++			__func__, size, data);
++		return -EINVAL;
++	}
++
++	size_aligned4byte = (size+3) & 0xFFFFFFFC;
++	ocm_core_open();
++	if (q6core_lcl.core_handle_q) {
++		payload = kzalloc(sizeof(struct adsp_dts_eagle) +
++				  size_aligned4byte, GFP_KERNEL);
++		if (!payload) {
++			pr_err("DTS_EAGLE_CORE - %s: out of memory (aligned size %i).\n",
++				__func__, size_aligned4byte);
++			return -ENOMEM;
++		}
++		payload->hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_EVENT,
++						APR_HDR_LEN(APR_HDR_SIZE),
++						APR_PKT_VER);
++		payload->hdr.pkt_size = sizeof(struct adsp_dts_eagle) +
++					       size_aligned4byte;
++		payload->hdr.src_port = 0;
++		payload->hdr.dest_port = 0;
++		payload->hdr.token = 0;
++		payload->hdr.opcode = ADSP_CMD_SET_DTS_EAGLE_DATA_ID;
++		payload->id = DTS_EAGLE_LICENSE_ID;
++		payload->overwrite = 1;
++		payload->size = size;
++		memcpy(payload->data, data, size);
++		rc = apr_send_pkt(q6core_lcl.core_handle_q,
++				(uint32_t *)payload);
++		if (rc < 0) {
++			pr_err("DTS_EAGLE_CORE - %s: failed op[0x%x]rc[%d]\n",
++				__func__, payload->hdr.opcode, rc);
++		}
++		kfree(payload);
++	}
++	return rc;
++}
++
++int core_dts_eagle_get(int id, int size, char *data)
++{
++	struct apr_hdr ah;
++	int rc = 0;
++
++	pr_debug("DTS_EAGLE_CORE - %s\n", __func__);
++	if (size <= 0 || !data) {
++		pr_err("DTS_EAGLE_CORE - %s: invalid size %i or pointer %pK.\n",
++			__func__, size, data);
++		return -EINVAL;
++	}
++	ocm_core_open();
++	if (q6core_lcl.core_handle_q) {
++		ah.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_EVENT,
++				APR_HDR_LEN(APR_HDR_SIZE), APR_PKT_VER);
++		ah.pkt_size = sizeof(struct apr_hdr);
++		ah.src_port = 0;
++		ah.dest_port = 0;
++		ah.token = 0;
++		ah.opcode = id;
++
++		q6core_lcl.bus_bw_resp_received = 0;
++		generic_get_data = kzalloc(sizeof(struct generic_get_data_)
++					   + size, GFP_KERNEL);
++		if (!generic_get_data) {
++			pr_err("DTS_EAGLE_CORE - %s: error allocating memory of size %i\n",
++				__func__, size);
++			return -ENOMEM;
++		}
++
++		rc = apr_send_pkt(q6core_lcl.core_handle_q,
++				(uint32_t *)&ah);
++		if (rc < 0) {
++			pr_err("DTS_EAGLE_CORE - %s: failed op[0x%x]rc[%d]\n",
++				__func__, ah.opcode, rc);
++			goto fail_cmd_2;
++		}
++
++		rc = wait_event_timeout(q6core_lcl.bus_bw_req_wait,
++				(q6core_lcl.bus_bw_resp_received == 1),
++				msecs_to_jiffies(TIMEOUT_MS));
++		if (!rc) {
++			pr_err("DTS_EAGLE_CORE - %s: EAGLE get params timed out\n",
++				__func__);
++			rc = -EINVAL;
++			goto fail_cmd_2;
++		}
++		if (generic_get_data->valid) {
++			rc = 0;
++			memcpy(data, generic_get_data->ints, size);
++		} else {
++			rc = -EINVAL;
++			pr_err("DTS_EAGLE_CORE - %s: EAGLE get params problem getting data - check callback error value\n",
++				__func__);
++		}
++	}
++
++fail_cmd_2:
++	kfree(generic_get_data);
++	generic_get_data = NULL;
++	return rc;
++}
++
+ uint32_t core_set_dolby_manufacturer_id(int manufacturer_id)
+ {
+ 	struct adsp_dolby_manufacturer_id payload;
+-- 
+2.25.0
+

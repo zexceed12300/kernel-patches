@@ -1,0 +1,118 @@
+From 9ddbc0bd5bac407ccaed02f34b5f8fc1de270568 Mon Sep 17 00:00:00 2001
+From: zexceed12300 <zexceed12300@gmail.com>
+Date: Mon, 3 Aug 2020 20:07:25 +0000
+Subject: [PATCH] add-adreno-boost-devfreq-based
+
+---
+ drivers/devfreq/Kconfig                  |  6 +++
+ drivers/devfreq/governor_msm_adreno_tz.c | 49 ++++++++++++++++++++++++
+ 2 files changed, 55 insertions(+)
+
+diff --git a/drivers/devfreq/Kconfig b/drivers/devfreq/Kconfig
+index a020a7400..9e2c2c517 100644
+--- a/drivers/devfreq/Kconfig
++++ b/drivers/devfreq/Kconfig
+@@ -87,6 +87,12 @@ config ADRENO_IDLER
+ 	  just for calculating frequency for idle to reduce the
+ 	  wasted power coming from stock Adreno TZ while
+ 	  maintaining high-performance.
++	  
++config ADRENO_BOOST
++	tristate "MSM Adreno boost"
++	depends on DEVFREQ_GOV_MSM_ADRENO_TZ
++	help
++	  Enable Adreno boost parameter, by flar2
+ 
+ config MSM_BIMC_BWMON
+ 	tristate "MSM BIMC Bandwidth monitor hardware"
+diff --git a/drivers/devfreq/governor_msm_adreno_tz.c b/drivers/devfreq/governor_msm_adreno_tz.c
+index e34cc8d32..7eed81194 100644
+--- a/drivers/devfreq/governor_msm_adreno_tz.c
++++ b/drivers/devfreq/governor_msm_adreno_tz.c
+@@ -63,6 +63,9 @@ static u64 suspend_time;
+ static u64 suspend_start;
+ static unsigned long acc_total, acc_relative_busy;
+ 
++#ifdef CONFIG_ADRENO_BOOST
++static unsigned int adrenoboost = 0;
++#endif
+ static struct msm_adreno_extended_profile *partner_gpu_profile;
+ static void do_partner_start_event(struct work_struct *work);
+ static void do_partner_stop_event(struct work_struct *work);
+@@ -174,6 +177,34 @@ void compute_work_load(struct devfreq_dev_status *stats,
+ 	spin_unlock(&sample_lock);
+ }
+ 
++#ifdef CONFIG_ADRENO_BOOST
++static ssize_t adrenoboost_show(struct device *dev,
++		struct device_attribute *attr, char *buf)
++{
++	size_t count = 0;
++	count += sprintf(buf, "%d\n", adrenoboost);
++
++	return count;
++}
++
++static ssize_t adrenoboost_save(struct device *dev,
++		struct device_attribute *attr, const char *buf, size_t count)
++{
++	int input;
++	sscanf(buf, "%d ", &input);
++	if (input < 0 || input > 3) {
++		adrenoboost = 0;
++	} else {
++		adrenoboost = input;
++	}
++
++	return count;
++}
++
++static DEVICE_ATTR(adrenoboost, 0644,
++		adrenoboost_show, adrenoboost_save);
++#endif
++
+ /* Trap into the TrustZone, and call funcs there. */
+ static int __secure_tz_reset_entry2(unsigned int *scm_data, u32 size_scm_data,
+ 					bool is_64)
+@@ -388,6 +419,16 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq,
+ #endif
+ 
+ 	priv->bin.total_time += stats.total_time;
++	
++#ifdef CONFIG_ADRENO_BOOST
++	// scale busy time up based on adrenoboost parameter, only if MIN_BUSY exceeded...
++	if ((unsigned int)(priv->bin.busy_time + stats.busy_time) >= MIN_BUSY) {
++		priv->bin.busy_time += stats.busy_time * (1 + (adrenoboost*3)/2);
++	} else {
++		priv->bin.busy_time += stats.busy_time;
++	}
++#endif
++	
+ 	priv->bin.busy_time += stats.busy_time;
+ 
+ 	if (stats.private_data)
+@@ -525,6 +566,10 @@ static int tz_start(struct devfreq *devfreq)
+ 	for (i = 0; adreno_tz_attr_list[i] != NULL; i++)
+ 		device_create_file(&devfreq->dev, adreno_tz_attr_list[i]);
+ 
++#ifdef CONFIG_ADRENO_BOOST
++ 	device_create_file(&devfreq->dev, &dev_attr_adrenoboost);
++#endif
++
+ 	return kgsl_devfreq_add_notifier(devfreq->dev.parent, &priv->nb);
+ }
+ 
+@@ -535,6 +580,10 @@ static int tz_stop(struct devfreq *devfreq)
+ 
+ 	kgsl_devfreq_del_notifier(devfreq->dev.parent, &priv->nb);
+ 
++#ifdef CONFIG_ADRENO_BOOST
++	device_remove_file(&devfreq->dev, &dev_attr_adrenoboost);
++#endif
++
+ 	for (i = 0; adreno_tz_attr_list[i] != NULL; i++)
+ 		device_remove_file(&devfreq->dev, adreno_tz_attr_list[i]);
+ 
+-- 
+2.25.0
+
